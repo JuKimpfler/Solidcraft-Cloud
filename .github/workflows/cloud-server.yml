@@ -1,0 +1,59 @@
+# Prüft den Datei-Server unter cloud/server (Format, Lints, Tests) und baut ihn für x86_64 und
+# arm64 (Raspberry Pi). Die Binärdateien hängen als Artefakte am Lauf.
+name: Cloud server
+
+on:
+  push:
+    branches: [main]
+    paths: ["cloud/server/**", ".github/workflows/cloud-server.yml"]
+  pull_request:
+    paths: ["cloud/server/**", ".github/workflows/cloud-server.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-server-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  server:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: cloud/server
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: cloud/server
+          key: cloud-server-${{ matrix.arch }}
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo test --locked
+      - name: Release build
+        run: cargo build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: solidcraft-cloud-server-${{ matrix.arch }}
+          path: cloud/server/target/release/solidcraft-cloud-server
+          if-no-files-found: error

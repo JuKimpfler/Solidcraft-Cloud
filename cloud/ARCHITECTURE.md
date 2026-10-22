@@ -28,21 +28,28 @@ Vorhandene Einhängepunkte (`Services` in `crates/ui-egui/src/lib.rs`): `pick_op
 `can_restore`, `restore_file`, `browser_files`. Die Startseite (`crates/ui-egui/src/home.rs`) hat
 die Beispiele fest einkompiliert und `MAX_RECENT = 12` Einträge für „Recent designs".
 
-## Schnittstelle des Datei-Servers (Entwurf, M1)
+## Schnittstelle des Datei-Servers (umgesetzt in M1, `cloud/server/`)
 
-| Aufruf | Zweck |
-|---|---|
-| `GET /api/designs` | Liste: Name, Größe, Änderungszeit, ETag, Sperre (wer, bis wann) |
-| `GET /api/designs/{name}` | Datei laden, ETag im Header |
-| `PUT /api/designs/{name}` | Speichern, `If-Match: <ETag>` Pflicht, bei Abweichung `412` |
-| `DELETE /api/designs/{name}` | Löschen (nur ohne fremde Sperre) |
-| `POST /api/designs/{name}/lock` | Sperre nehmen; `409` mit Besitzer, wenn schon gesperrt |
-| `PUT /api/designs/{name}/lock` | Heartbeat, verlängert die Sperre |
-| `DELETE /api/designs/{name}/lock` | Sperre freigeben |
+| Aufruf | Zweck | Antworten |
+|---|---|---|
+| `GET /api/health` | Lebenszeichen, ohne Anmeldung | `200` |
+| `GET /api/designs` | Liste: Name, Größe, `modified_ms`, ETag, Sperre (`owner`, `expires_in_s`, `mine`), dazu `max_bytes` | `200` |
+| `GET /api/designs/{name}` | Datei laden, ETag im Header | `200`, `404` |
+| `PUT /api/designs/{name}` | Speichern. Gibt es die Datei, ist `If-Match: <ETag>` Pflicht (`*` überschreibt ohne Prüfung) | `201` neu, `200`, `428` ohne If-Match, `412` ETag veraltet, `423` fremd gesperrt, `413` zu groß |
+| `DELETE /api/designs/{name}` | Löschen (`If-Match` optional) | `204`, `404`, `412`, `423` |
+| `POST /api/designs/{name}/lock` | Sperre nehmen, liefert `token` | `200`, `409` mit Besitzer |
+| `PUT /api/designs/{name}/lock` | Heartbeat, Header `X-Lock-Token` | `200`, `409` mit `lost: true` |
+| `DELETE /api/designs/{name}/lock` | Freigeben mit `X-Lock-Token`, oder `?force=1` für eine fremde Sperre | `204`, `409` |
 
-Der Benutzername kommt aus der Anmeldung am Apache (`X-Remote-User`, vom Proxy gesetzt, nie vom
-Client; der Server muss ihn vor Clients abschirmen, also nur auf dem lokalen Interface lauschen).
-Dateinamen werden streng geprüft (keine Pfade, keine versteckten Dateien, Größenlimit).
+- **Schreiben unter Sperre:** Ist ein Design gesperrt, geht `PUT` und `DELETE` nur mit dem Header
+  `X-Lock-Token` der Sperre. Auch dieselbe Person in einem zweiten Tab bekommt `423`.
+- **Namen:** Buchstaben, Ziffern, Leerzeichen und `- _ . ( ) ,`; Endung `.solidcraft`, `.solvecraft`
+  oder `.json`; keine Pfade, kein führender Punkt, höchstens 200 Bytes. Der Name steht prozentkodiert
+  im Pfad (`Mein%20Geh%C3%A4use.solidcraft`).
+- **ETag** besteht aus Inode, Änderungszeit und Größe. Er ändert sich bei jedem Schreiben, auch bei
+  einer Änderung von außen (z. B. durch Nextcloud).
+- **Benutzer:** Der Name kommt im Header `X-Remote-User` vom Reverse Proxy (Apache) nach der
+  Anmeldung, nie vom Client. Der Server vertraut ihm blind und lauscht deshalb nur lokal.
 
 ## Sperren
 
@@ -53,7 +60,10 @@ Dateinamen werden streng geprüft (keine Pfade, keine versteckten Dateien, Grö�
 - Ist ein Design schon gesperrt, öffnet die App eine **lokale Kopie** und zeigt „gesperrt von X".
   Speichern ist dann nur unter neuem Namen möglich.
 - Mehrere Tabs: pro offenem Server-Design eine eigene Sperre.
-- Eine Sperre lässt sich serverseitig von Hand aufheben (z. B. wenn ein Notebook zugeklappt wurde).
+- Eine Sperre lässt sich von Hand aufheben (`DELETE …/lock?force=1`), z. B. wenn ein Notebook
+  zugeklappt wurde. Das darf jede angemeldete Person: Bei drei vertrauten Leuten reicht das.
+- Ein Heartbeat mit dem alten Token klappt auch nach kurzem Ausfall noch, solange niemand anderes
+  die Sperre genommen hat (Notebook im Ruhezustand).
 - Der Server hält Sperren im Speicher; bei einem Neustart sind alle frei.
 
 ## Updates
