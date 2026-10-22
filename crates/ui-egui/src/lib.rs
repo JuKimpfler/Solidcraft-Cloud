@@ -367,8 +367,6 @@ pub struct SolveApp {
     pub cam_anim: Option<CameraAnim>,
     /// Seconds since start, as of this frame.
     pub now: f64,
-    /// The view before the current sketch started (Finish Sketch returns to it).
-    pub pre_sketch_cam: Option<Camera>,
     /// The history marker before Edit Sketch rolled the timeline to the sketch; Finish Sketch
     /// restores it.
     pub pre_sketch_marker: Option<Option<usize>>,
@@ -535,7 +533,6 @@ impl SolveApp {
             cam: Camera::default(),
             cam_anim: None,
             now: 0.0,
-            pre_sketch_cam: None,
             pre_sketch_marker: None,
             services,
             file_picker: None,
@@ -1111,7 +1108,7 @@ impl SolveApp {
 
     /// Edit a sketch: roll the timeline to just after it (back, so later features don't hide
     /// it, or forward from before it, where it isn't built yet: #2716), turn the camera to face
-    /// it, and remember both so Finish Sketch puts them back. Editing the sketch that is already open does nothing; editing another one
+    /// it, and remember the marker so Finish Sketch puts it back. Editing the sketch that is already open does nothing; editing another one
     /// finishes the current sketch first, so edit sessions never nest.
     pub fn edit_sketch(&mut self, id: u64) {
         if let solidcraft_engine::doc::FaceAttachmentStatus::Lost { message, .. } =
@@ -1132,7 +1129,6 @@ impl SolveApp {
         let Some(idx) = self.session.doc.feature_index(id) else { return };
         let marker = self.session.doc.marker;
         let rolled = marker != Some(idx + 1) && self.run("timeline.roll_to", json!({ "position": idx + 1 })).is_ok();
-        let before = self.cam;
         if self.run("sketch.edit", json!({ "sketch": id })).is_err() {
             if rolled {
                 self.restore_marker(marker);
@@ -1140,12 +1136,11 @@ impl SolveApp {
             return;
         }
         self.pre_sketch_marker = rolled.then_some(marker);
-        self.pre_sketch_cam = Some(before);
         dialogs::look_at_sketch(self);
     }
 
-    /// Finish the active sketch: stop editing, restore the history marker Edit Sketch moved and
-    /// return to the view from before the sketch.
+    /// Finish the active sketch: stop editing and restore the history marker Edit Sketch moved.
+    /// The camera stays where it is, however the sketch is left.
     pub fn finish_sketch(&mut self) {
         sketch_text_move::cancel_drag(self);
         if sketch_text::editing(self) || self.dialog.as_ref().is_some_and(|d| matches!(d.kind, dialogs::Kind::TextMove(_))) {
@@ -1156,9 +1151,6 @@ impl SolveApp {
         let _ = self.run("sketch.finish", json!({}));
         if let Some(marker) = self.pre_sketch_marker.take() {
             self.restore_marker(marker);
-        }
-        if let Some(c) = self.pre_sketch_cam.take() {
-            self.animate_to(c);
         }
     }
 

@@ -29,7 +29,16 @@ pub(crate) fn icon_button_at(ui: &mut Ui, rect: egui::Rect, icon: &str, label: &
     icon_button_colored(ui, rect, icon, label, None)
 }
 
+/// Quiet secondary action: a small, muted glyph with the normal full-size hit target.
+pub(crate) fn quiet_icon_button_at(ui: &mut Ui, rect: egui::Rect, icon: &str, label: &str) -> Response {
+    icon_button_presentation(ui, rect, icon, label, None, true)
+}
+
 pub(super) fn icon_button_colored(ui: &mut Ui, rect: egui::Rect, icon: &str, label: &str, ink: Option<egui::Color32>) -> Response {
+    icon_button_presentation(ui, rect, icon, label, ink, false)
+}
+
+fn icon_button_presentation(ui: &mut Ui, rect: egui::Rect, icon: &str, label: &str, ink: Option<egui::Color32>, quiet: bool) -> Response {
     let t = Tokens::get();
     let response = ui.interact(rect, ui.make_persistent_id(("icon_button", icon, label)), egui::Sense::click());
     if response.clicked() {
@@ -40,9 +49,15 @@ pub(super) fn icon_button_colored(ui: &mut Ui, rect: egui::Rect, icon: &str, lab
     }
     crate::icons::paint_ink(
         ui.painter(),
-        rect.shrink(t.form_icon_inset),
+        if quiet { egui::Rect::from_center_size(rect.center(), vec2(t.space_12, t.space_12)) } else { rect.shrink(t.form_icon_inset) },
         icon,
-        ink.unwrap_or(if response.hovered() || response.has_focus() { t.form_ink } else { t.form_dim }),
+        ink.unwrap_or(if response.hovered() || response.has_focus() {
+            t.form_ink
+        } else if quiet {
+            t.form_dim.lerp_to_gamma(t.control_fill, 0.35)
+        } else {
+            t.form_dim
+        }),
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), crate::i18n::tr_label(label)));
     pointer_on_hover(ui, &response);
@@ -256,6 +271,8 @@ pub enum Button {
     Primary,
     Small,
     Enabled(bool),
+    Ghost,
+    SmallSelected,
 }
 
 fn button_widget(label: egui::WidgetText, options: Button) -> egui::Button<'static> {
@@ -265,6 +282,10 @@ fn button_widget(label: egui::WidgetText, options: Button) -> egui::Button<'stat
         Button::Primary => {
             let ink = if crate::theme::contrast_ratio(t.on_accent, t.form_primary) >= 4.5 { t.on_accent } else { t.tab_on_fill_dark };
             egui::Button::new(label.color(ink)).fill(t.form_primary)
+        }
+        Button::Ghost => egui::Button::new(label).frame(false),
+        Button::SmallSelected => {
+            egui::Button::new(label.color(t.selected_ink)).small().fill(t.selected_bg).stroke(egui::Stroke::new(1.0, t.form_primary))
         }
         _ => egui::Button::new(label),
     }

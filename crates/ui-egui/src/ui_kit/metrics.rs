@@ -72,6 +72,9 @@ pub(super) fn header_column(ui: &Ui, text: &str) -> f32 {
 /// two frames and shrinks again when the long rows go away.
 /// Shared label width, capped at 1.6x. Tokens: `form_label_width, font_label, dialog_label, space_4`.
 pub(super) fn label_column(ui: &Ui, text: &str, row_width: f32) -> f32 {
+    if let Some(width) = ui.stack().iter().find_map(|node| node.tags().get_downcast::<f32>(super::layout::FIXED_LABEL)) {
+        return width.min(row_width * 0.6);
+    }
     let t = Tokens::get();
     // Wide manager cards use the approved 104 pt label column; compact cards retain room
     // for their existing controls. Both sizes derive from the same form/spacing tokens.
@@ -108,7 +111,13 @@ pub(crate) fn table_row_height() -> f32 {
 }
 
 /// Label/control gutter for the same responsive form grid as label_column.
-pub(super) fn label_gap(width: f32) -> f32 {
+pub(super) fn label_gap(ui: &Ui, width: f32) -> f32 {
     let t = Tokens::get();
-    if width >= t.form_card_width + t.space_24 * 2.0 { t.space_10 } else { t.space_8 }
+    if ui.stack().iter().any(|node| node.tags().contains(super::layout::FIXED_LABEL)) {
+        t.space_14
+    } else if width >= t.form_card_width + t.space_24 * 2.0 {
+        t.space_10
+    } else {
+        t.space_8
+    }
 }

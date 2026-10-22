@@ -29,6 +29,95 @@ macro_rules! element {
 
 // One entry per element/variant: names, rendering and geometry expectations stay together.
 const ELEMENTS: &[Element] = &[
+    element!("settings_form", |ui, state| {
+        settings_form(ui, Tokens::get().form_label_width, |ui| {
+            row(ui, "Sample", |ui| {
+                field(ui, &mut state.value);
+            });
+        });
+    }),
+    element!("settings_composition", |ui, _| {
+        settings_heading(ui, "Interface", "Appearance and workspace");
+        settings_section(ui, "gallery_settings", "Layout", |ui| {
+            settings_pair(
+                ui,
+                |ui| {
+                    text(ui, "Controls", Text::Inline);
+                },
+                |ui, ()| layout_preview(ui, LayoutPreview { compact: true, labels: false, history: 2, translucent: false }),
+            )
+        });
+    }),
+    element!("settings_permission_choices", |ui, state| {
+        settings_choices(
+            ui,
+            &[
+                SettingsChoice {
+                    key: "gallery:ask",
+                    title: "Ask first",
+                    summary: "Confirm changes before they run.",
+                    detail: "Full permission details",
+                },
+                SettingsChoice {
+                    key: "gallery:edits",
+                    title: "Allow edits",
+                    summary: "Ask before running other tools.",
+                    detail: "Full permission details",
+                },
+                SettingsChoice {
+                    key: "gallery:all",
+                    title: "Allow all",
+                    summary: "Run supported tools without asking.",
+                    detail: "Full permission details",
+                },
+            ],
+            &mut state.selected,
+        );
+        settings_pointer_preview(ui, true, "Normal", true);
+    }),
+    element!("preference_theme_rail", |ui, _| {
+        theme_rail(
+            ui,
+            |ui| {
+                for label in ["Light", "Dark", "System"] {
+                    option_card(
+                        ui,
+                        label,
+                        Some("Built in"),
+                        label == "Light",
+                        true,
+                        PreferenceFigure::Theme { palette: Tokens::light().into(), system: label == "System" },
+                    );
+                }
+            },
+            |ui| {
+                theme_import_tile(ui, "Import…", "theme file");
+            },
+        );
+    }),
+    element!("preference_option_cards", |ui, _| {
+        ui.horizontal_wrapped(|ui| {
+            for figure in [
+                PreferenceFigure::Theme { palette: Tokens::light().into(), system: true },
+                PreferenceFigure::Pivot(2),
+                PreferenceFigure::Quality(24),
+                PreferenceFigure::Antialiasing(8),
+                PreferenceFigure::ContactShading(true),
+                PreferenceFigure::UpAxis(true),
+            ] {
+                option_card(ui, "Choice", Some("Example"), true, true, figure);
+            }
+        });
+    }),
+    element!("preference_specimens", |ui, _| {
+        tab_accent_strip(ui);
+        scale_specimen(ui, 1.1);
+        status_palette_sample(ui, crate::theme::ColorVision::Deutan);
+        colour_vision_sample(ui, &Tokens::get());
+        settings_autosave_timeline(ui, 5.0);
+        settings_axis_row(ui, "Push X", 0.6, [0.1, 0.2], |_| {}, |_| {}, |_| {});
+        settings_mouse_mapping(ui, &[(vec!["Shift".into(), "Middle drag".into()], "Orbit".into())], |_| {});
+    }),
     element!("assistant_entry", |ui, _| {
         let t = Tokens::get();
         egui::Frame::NONE.fill(t.app_bar).show(ui, |ui| {
@@ -344,6 +433,7 @@ const ELEMENTS: &[Element] = &[
             ui,
             &mut s.selected,
             &[WindowPage {
+                group: Some("prefs.input"),
                 icon: "settings",
                 label: "ui.general",
                 handle: "gallery:page",
@@ -877,6 +967,10 @@ const ELEMENTS: &[Element] = &[
     element!("icon_button_at", |ui, _| {
         let (rect, _) = ui.allocate_exact_size(vec2(row_height(), row_height()), egui::Sense::hover());
         icon_button_at(ui, rect, "close", "Close");
+    }),
+    element!("quiet_icon_button_at", |ui, _| {
+        let (rect, _) = ui.allocate_exact_size(vec2(row_height(), row_height()), egui::Sense::hover());
+        quiet_icon_button_at(ui, rect, "plus", "Add shortcut");
     }),
     element!("keyboard", |ui, _| {
         assert_eq!(keyboard(ui.ctx(), true), Action::None);

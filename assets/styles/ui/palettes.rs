@@ -310,12 +310,12 @@ impl Tokens {
         t.render_ink = Color32::from_rgb(224, 116, 174);
         t.render_soft = Color32::from_rgb(64, 35, 54);
         t.tab_on_fill_dark = Color32::BLACK;
-        t.dialog_body = Color32::from_rgb(59, 68, 83);
+        t.dialog_body = Color32::from_rgb(39, 43, 52);
         t.dialog_footer = Color32::from_rgb(47, 52, 62);
         t.dialog_rule = Color32::from_rgb(53, 59, 71);
-        t.control_fill = Color32::from_rgb(39, 43, 52);
+        t.control_fill = Color32::from_rgb(28, 31, 38);
         t.control_border = Color32::from_rgb(74, 82, 98);
-        t.dialog_label = Color32::from_rgb(180, 187, 200);
+        t.dialog_label = t.text;
         t.selected_ink = Color32::from_rgb(156, 199, 245);
         t.selected_bg = Color32::from_rgb(42, 70, 110);
         t.construction_geom = icon_primary(crate::icon_svg::CONSTRUCTION_PRIMARY[1]);
@@ -340,8 +340,8 @@ impl Tokens {
         t.dimension_driven = Color32::from_rgb(142, 150, 164);
         t.sketch_point_free = Color32::from_rgb(92, 150, 255);
         t.profile_fill = Color32::from_rgba_unmultiplied_const(120, 150, 200, 40);
-        t.dialog_bg = Color32::from_rgb(59, 68, 83);
-        t.dialog_border = Color32::from_rgb(72, 83, 99);
+        t.dialog_bg = Color32::from_rgb(39, 43, 52);
+        t.dialog_border = Color32::from_rgb(63, 69, 82);
         t.chip = Color32::from_rgb(59, 101, 168);
         t.glyph_bg = Color32::from_rgb(44, 50, 60);
         t.glyph_edge = Color32::from_rgb(200, 130, 120);
@@ -357,7 +357,7 @@ impl Tokens {
         t.bend_up = Color32::from_rgb(110, 200, 120);
         t.bend_down = Color32::from_rgb(240, 150, 80);
         t.form_ink = t.text;
-        t.form_dim = t.text_dim;
+        t.form_dim = Color32::from_rgb(180, 187, 200);
         t.form_primary = t.accent;
         t.form_error = t.error;
         t.form_error_fill = t.timeline_item_error;

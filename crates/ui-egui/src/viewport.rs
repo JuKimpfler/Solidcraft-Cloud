@@ -7176,10 +7176,11 @@ mod tests {
         let mut h = crate::scenario::Harness::new();
         h.app.home.open = false;
         let keys = |app: &SolveApp| (scene_key(app), highlight_key(app));
-        h.call("ui.prefs", json!({"open": "Graphics"}));
-        assert!(h.widget("Colour vision").is_some() && h.widget("Mode").is_some());
+        h.call("ui.prefs", json!({"open": "Interface"}));
+        crate::prefs::reveal_preference(&mut h, "prefs:color_vision");
+        assert!(h.widget("Colour vision").is_some() && h.widget("Off").is_some() && h.widget("Deutan").is_some());
         let before = keys(&h.app);
-        h.call("ui.prefs", json!({"color_vision": "deutan"}));
+        h.step(&json!({"click":{"handle":"dialog:Mode:Deutan"}})).unwrap();
         h.frame();
         assert_eq!(crate::theme::vision(), ColorVision::Deutan);
         assert_eq!(Tokens::get(), Tokens::themed(crate::theme::is_dark(), ColorVision::Deutan));

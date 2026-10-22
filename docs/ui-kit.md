@@ -31,9 +31,10 @@ preferences, manager cards, prompts, context menus and the sketch palette. Impor
 - `Window` composes the shared Panel frame with a 40 pt icon/title/close header,
   padded content and optional 48 pt footer. `show_with_left` pins a left action beside
   the right-aligned buttons. `show_pages` accepts declarative `WindowPage` entries
-  (existing icon, i18n label key, stable handle, scroll policy and draw callback).
+  (icon, i18n label key, optional group heading, stable handle, scroll policy and draw callback).
   Its 188 pt soft page list has 32 pt icon/label rows, selected tint/ink and a divider.
-  All nine existing Preferences pages retain their order, settings and handles.
+  Preferences has nine grouped pages; legacy control-channel page names remain aliases.
+  `page_rows` opts into a taller body while preserving viewport bounds.
   `actions`, `anchor`/`placed`, `cards`, `fields` and `keep_open_on_escape` retain
   existing window behavior. Empty action labels omit the footer.
 - `Confirm` is an input-blocking modal using the same card frame and footer controls.
@@ -55,6 +56,14 @@ preferences, manager cards, prompts, context menus and the sketch palette. Impor
   target so nearby sketch picks are not intercepted; alignment stays shared.
 - Scenario handles and accessible labels are API. Consolidated options preserve
   the former geometry, wrapping, native metadata and publication keys.
+
+Preference compositions use `settings_heading`, shared disclosure `settings_section` headings and
+`settings_pair` for responsive controls beside one specimen. `option_card` supplies the
+shared illustrated radio control. `settings_form` and `settings_block_hint` define aligned label grids; `theme_rail` keeps the import tile fixed beside a scrollbar-free scrolling row. `PreferenceFigure` owns theme swatches, orbit pivots,
+quality, anti-aliasing, contact shading and up-axis figures. `layout_preview` follows the
+four workspace choices without opening another viewport. Scale, palette, autosave, mouse
+and live-axis specimens share tokens and the gallery; live bars show actual calibrated
+input and introduce no repaint timer.
 
 ## Elements
 

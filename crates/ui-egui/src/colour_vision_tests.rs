@@ -875,7 +875,7 @@ fn the_sections_messages_are_in_every_catalog() {
     let ids: Vec<&str> = ColorVision::ALL
         .into_iter()
         .flat_map(|m| [m.label_id(), m.help_id()])
-        .chain(crate::prefs::COLOUR_VISION_SAMPLE)
+        .chain(crate::ui_kit::COLOUR_VISION_SAMPLE)
         .chain(["ui.colour_vision", "ui.colour_vision_mode", "ui.colour_vision_sample", "ui.colour_vision_note"])
         .collect();
     for (lang, text) in [
@@ -1013,22 +1013,22 @@ fn random_values_never_panic_and_only_the_four_ids_are_taken() {
 }
 
 #[test]
-fn cancel_puts_the_mode_back_ok_keeps_it_and_restore_defaults_resets_graphics_only() {
+fn cancel_puts_the_mode_back_ok_keeps_it_and_restore_defaults_resets_interface_only() {
     let mut app = app();
     let control = |app: &mut crate::SolveApp, p: serde_json::Value| crate::prefs::control(app, &p).unwrap();
-    control(&mut app, json!({"open": "Graphics"}));
+    control(&mut app, json!({"open": "Interface"}));
     control(&mut app, json!({"color_vision": "protan"}));
     assert_eq!(app.preferences.color_vision, ColorVision::Protan);
     control(&mut app, json!({"button": "cancel"}));
     assert_eq!(app.preferences.color_vision, ColorVision::Off);
-    control(&mut app, json!({"open": "Graphics"}));
+    control(&mut app, json!({"open": "Interface"}));
     control(&mut app, json!({"color_vision": "tritan", "button": "ok"}));
     assert_eq!(app.preferences.color_vision, ColorVision::Tritan);
     // Restore Defaults on another page leaves it.
     control(&mut app, json!({"open": "General"}));
     control(&mut app, json!({"button": "defaults"}));
     assert_eq!(app.preferences.color_vision, ColorVision::Tritan);
-    control(&mut app, json!({"open": "Graphics"}));
+    control(&mut app, json!({"open": "Interface"}));
     control(&mut app, json!({"button": "defaults"}));
     assert_eq!(app.preferences.color_vision, ColorVision::Off);
     control(&mut app, json!({"button": "ok"}));
