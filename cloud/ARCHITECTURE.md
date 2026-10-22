@@ -1,6 +1,7 @@
 # Architektur (Entwurf)
 
-Stand: Meilenstein M2. Datei-Server (M1) und Client-Anbindung (M2) sind umgesetzt, Sperren in der App (M3) und die Startseite (M4) sind noch Plan.
+Stand: Meilenstein M4. Datei-Server (M1), Client-Anbindung (M2), Sperren in der App (M3) und die
+Startseite (M4) sind umgesetzt; offen sind der Betrieb auf dem Pi und die Update-Automatik (M5).
 
 ## Überblick
 
@@ -76,10 +77,9 @@ die Beispiele fest einkompiliert und `MAX_RECENT = 12` Einträge für „Recent 
   nimmt den ETag deshalb aus der JSON-Antwort des Servers und entfernt solche Zusätze.
 - **Ohne Server** (Seite ohne `/api/`) fragt die App einmal `/api/health`, bekommt `404` und
   verhält sich wie Upstream.
-- **Grenzen in M2:** Sperren nimmt die App noch nicht (kommt mit M3); die Liste zeigt aber schon,
-  wer ein Design gesperrt hat. Auch „Einfügen STEP…“ zeigt die Server-Liste zuerst, von dort führt
-  „Vom Computer öffnen…“ zum gewohnten Dialog. Die Texte unserer Fenster sind deutsch, unabhängig
-  von der Sprache der App. Vorschaubilder der Server-Designs auf der Startseite kommen mit M4.
+- **Grenzen:** Auch „Einfügen STEP…“ zeigt die Server-Liste zuerst, von dort führt „Vom Computer
+  öffnen…“ zum gewohnten Dialog. Die Texte unserer Fenster sind deutsch, unabhängig von der
+  Sprache der App.
 
 **Getestet** (Chromium unter Xvfb, Web-Build gegen den Datei-Server hinter einem Test-Proxy mit Basic
 Auth, zwei Benutzer `alice` und `bob`): neues Design per „Speichern“ → Namensdialog → `201`;
@@ -91,20 +91,47 @@ Tab (kein zweiter Download); nach Neuladen der Seite öffnet der Eintrag unter �
 die aktuelle Version vom Server; ohne Datei-Server bleibt die App beim Upstream-Verhalten. Die
 Namens-, URL- und ETag-Logik ist zusätzlich mit Unit-Tests abgedeckt (`cargo test -p solidcraft-web`).
 
-## Sperren
+## Sperren in der App (umgesetzt in M3)
 
 - Gesperrt wird **beim Öffnen**, nicht erst beim ersten Edit: Die App kennt keinen Nur-Lesen-Modus,
-  und sonst scheitert der Zweite erst beim Speichern.
-- Ablauf 60 s, Heartbeat alle 20 s. Beim Schließen des Tabs wird per `fetch(..., {keepalive: true})`
-  freigegeben, nach einem Absturz läuft die Sperre von allein ab.
-- Ist ein Design schon gesperrt, öffnet die App eine **lokale Kopie** und zeigt „gesperrt von X".
-  Speichern ist dann nur unter neuem Namen möglich.
-- Mehrere Tabs: pro offenem Server-Design eine eigene Sperre.
-- Eine Sperre lässt sich von Hand aufheben (`DELETE …/lock?force=1`), z. B. wenn ein Notebook
-  zugeklappt wurde. Das darf jede angemeldete Person: Bei drei vertrauten Leuten reicht das.
+  und sonst scheitert der Zweite erst beim Speichern. Jeder Weg ins Design nimmt die Sperre: die
+  Liste, „Zuletzt verwendet“ und die Startseite.
+- Ablauf 60 s, Heartbeat alle 20 s (`setInterval`, nicht am Zeichnen der Oberfläche hängend: ein
+  Design kann minutenlang unberührt offen sein). Beim Schließen des Tabs wird die Sperre
+  freigegeben, beim Verlassen der Seite per `fetch(..., {keepalive: true})`; nach einem Absturz
+  läuft sie von allein ab.
+- Ist ein Design schon gesperrt, öffnet die App eine **Kopie**: Sie heißt „<Name> (Kopie)“, hat
+  keine Datei und wird nirgends automatisch gespeichert. In der Statuszeile steht, wer das
+  Original hat; „Speichern“ fragt deshalb nach einem neuen Namen auf dem Server.
+- **Speichern unter sperrt mit:** Ein unter neuem Namen gespeichertes Design ist danach hier offen
+  und wird sofort gesperrt. Jedes `PUT` schickt den Token der eigenen Sperre mit (`X-Lock-Token`),
+  sonst lehnt der Server den eigenen Schreibzugriff mit `423` ab.
+- Mehrere Tabs: pro offenem Server-Design eine eigene Sperre. Ein zweites Fenster derselben Person
+  bekommt ebenfalls nur eine Kopie — der Server trennt Sitzungen, nicht Personen.
+- Eine Sperre lässt sich in der Liste von Hand aufheben (`DELETE …/lock?force=1`, zweiter Klick zur
+  Bestätigung), z. B. wenn ein Notebook zugeklappt wurde. Das darf jede angemeldete Person: Bei
+  drei vertrauten Leuten reicht das.
 - Ein Heartbeat mit dem alten Token klappt auch nach kurzem Ausfall noch, solange niemand anderes
-  die Sperre genommen hat (Notebook im Ruhezustand).
-- Der Server hält Sperren im Speicher; bei einem Neustart sind alle frei.
+  die Sperre genommen hat (Notebook im Ruhezustand). Ist sie weg, nimmt die App sie neu; gehört sie
+  inzwischen jemand anderem, sagt die Statuszeile das und empfiehlt „Speichern unter“.
+- Der Server hält Sperren im Speicher; bei einem Neustart sind alle frei. Der nächste Heartbeat
+  nimmt sie dann wieder.
+
+## Startseite (umgesetzt in M4)
+
+- Mit Datei-Server zeigt die Startseite **„Designs auf dem Server“** statt der eingebauten
+  Beispiele; ohne Server bleibt alles wie bei Upstream. Die Liste wird gezeigt, solange die Seite
+  offen ist, und höchstens alle 10 s neu geholt.
+- Jede Karte nennt den Namen, darunter entweder „geöffnet von X“ (bzw. „hier geöffnet“ /
+  „von dir in einem anderen Fenster geöffnet“) oder Größe und Änderungszeit.
+- **Vorschaubilder:** Das Bild steckt im Design selbst (`read_design_thumbnail`). Die Startseite
+  lädt dafür Designs **bis 4 MB**, eines nach dem anderen und nur solange sie zu sehen ist;
+  größere bleiben ohne Bild. Ein geöffnetes Design liefert sein Bild gratis mit. Gemerkt wird es
+  je ETag, also wird es nach einer Änderung neu gelesen.
+- Ein Klick öffnet das Design wie „Zuletzt verwendet“: Die Hülle holt es vom Server und nimmt die
+  Sperre. Ein schon offenes Design wechselt nur den Tab.
+- Eingriff in Upstream: `Services::server_designs` liefert der Startseite die Liste; alle Texte
+  kommen von der Hülle, `crates/ui-egui` bleibt sprachneutral.
 
 ## Updates
 
@@ -118,8 +145,9 @@ lädt neue Builds selbst nach und startet sie beim nächsten Aufruf.
 
 ## Offene Punkte
 
-- Größenlimit beim Vorladen der Designs für die Startseite (SolidCraft erlaubt bis 256 MB pro
-  Design).
+- Betrieb auf dem Pi: Apache, Nextcloud, Spoof-Test des `X-Remote-User`-Headers.
+- M3 und M4 sind im Browser gegen den Datei-Server zu prüfen (zwei Benutzer, Kopie, Heartbeat,
+  Startseite mit Bildern).
 - Anmeldung: zunächst Basic Auth in Apache, später evtl. Nextcloud-Konten über OIDC.
 - Upstream plant eigenen Cloud-Speicher (`docs/web-runtime.md`). Vor größeren Schritten dort in
   den Issues nachsehen.

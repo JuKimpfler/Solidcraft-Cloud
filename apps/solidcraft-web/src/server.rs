@@ -6,6 +6,12 @@
 //! someone else changed meanwhile is never overwritten. A design from the server is kept in memory
 //! only while a tab shows it: opening it again fetches the server's current version.
 //!
+//! Opening a design also takes its **lock** on the server, renewed every 20 s while the tab shows
+//! it and let go when the tab closes or the page goes away. A design somebody else has open is
+//! opened as a copy with no file of its own, so a save asks for a new name instead of writing
+//! over their work. With a file server the start page lists its designs in place of the built-in
+//! samples, with a picture read from each design that is small enough to fetch for one.
+//!
 //! The team works in German, so the messages are German. The path and name logic is plain Rust
 //! and tested natively; the browser calls are wasm-only.
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -18,6 +24,14 @@ pub const API: &str = "/api/";
 const EXTENSIONS: [&str; 3] = ["solidcraft", "solvecraft", "json"];
 /// The longest name the server takes.
 const MAX_NAME_BYTES: usize = 200;
+/// How often the locks this page holds are renewed. The server lets one run out after 60 s
+/// (`SOLIDCRAFT_LOCK_TTL`), so a missed beat still leaves two more.
+const HEARTBEAT_MS: i32 = 20_000;
+/// How long the start page's list may be before it is fetched again.
+const LIST_FRESH_MS: f64 = 10_000.0;
+/// The largest design the start page fetches for its picture: the picture sits inside the design,
+/// so a bigger one would mean downloading it whole just to show a card.
+const PREVIEW_MAX_BYTES: u64 = 4 << 20;
 
 /// The engine path of the design `name` on the server.
 pub fn path(name: &str) -> String {
@@ -81,6 +95,42 @@ pub fn design_url(name: &str) -> String {
     format!("{API}designs/{}", encode(name))
 }
 
+/// The URL of the lock on the design `name`.
+pub fn lock_url(name: &str) -> String {
+    format!("{API}designs/{}/lock", encode(name))
+}
+
+/// Who has a design open: this window, you somewhere else, or someone in the team.
+pub fn lock_text(owner: &str, mine: bool, here: bool) -> String {
+    match (here, mine) {
+        (true, _) => "hier geöffnet".into(),
+        (false, true) => "von dir in einem anderen Fenster geöffnet".into(),
+        (false, false) => format!("geöffnet von {owner}"),
+    }
+}
+
+/// What to tell the user who opened a design somebody has: this is a copy, and saving it asks for
+/// a new name (the design on the server stays as it is).
+pub fn copy_notice(name: &str, owner: &str, mine: bool) -> String {
+    let who = if mine {
+        format!("„{name}“ hast du in einem anderen Fenster geöffnet")
+    } else {
+        format!("„{name}“ ist von {owner} geöffnet")
+    };
+    format!("{who}. Hier ist nur eine Kopie: Mit „Speichern unter“ sicherst du sie unter einem neuen Namen.")
+}
+
+/// The lock ran out and somebody else took the design meanwhile.
+pub fn lock_lost(name: &str, owner: &str) -> String {
+    format!("Die Sperre für „{name}“ ist abgelaufen, {owner} hat das Design jetzt. Mit „Speichern unter“ sicherst du deine Änderungen.")
+}
+
+/// The line under a design's name on the start page.
+pub fn detail_text(lock: Option<&str>, size: u64, when: &str) -> String {
+    let what = lock.map_or_else(|| size_text(size), str::to_string);
+    if when.is_empty() { what } else { format!("{what} · {when}") }
+}
+
 /// An ETag as the server made it: a proxy that compresses the response (Apache's mod_deflate)
 /// marks it weak or adds `-gzip` inside the quotes, which the server would not recognise.
 pub fn normalize_etag(raw: &str) -> String {
@@ -127,11 +177,14 @@ mod web {
     use serde_json::Value;
     use solidcraft_engine::io::vfs;
     use solidcraft_ui_egui::theme::Tokens;
-    use solidcraft_ui_egui::{SolveApp, documents, ui_kit};
+    use solidcraft_ui_egui::{ServerDesign, ServerDesigns, SolveApp, documents, ui_kit};
     use wasm_bindgen::{JsCast as _, JsValue};
     use wasm_bindgen_futures::{JsFuture, spawn_local};
 
-    use super::{API, PREFIX, design_url, normalize_etag, parse, path, save_failure, size_text, taken, valid_name, with_extension};
+    use super::{
+        API, HEARTBEAT_MS, LIST_FRESH_MS, PREFIX, PREVIEW_MAX_BYTES, copy_notice, design_url, detail_text, lock_lost, lock_text, lock_url,
+        normalize_etag, parse, path, save_failure, size_text, taken, valid_name, with_extension,
+    };
     use crate::disk;
     use crate::files::{self, Files, Intent, err};
 
@@ -144,6 +197,19 @@ mod web {
         /// latest per design.
         static QUEUE: RefCell<VecDeque<(String, Vec<u8>)>> = const { RefCell::new(VecDeque::new()) };
         static BUSY: Cell<bool> = const { Cell::new(false) };
+        /// The lock this page holds on each design it has open: the server's token, which every
+        /// save and the renewals send back (`cloud/server/src/locks.rs`).
+        static LOCKS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    }
+
+    /// Said about Open for a design somebody has.
+    const COPY_HINT: &str = "Gesperrt: Das Design wird als Kopie geöffnet, Speichern geht nur unter einem neuen Namen.";
+    /// Said about lifting somebody else's lock.
+    const FORCE_HINT: &str = "Nur wenn niemand mehr daran arbeitet (zugeklapptes Notebook). Danach kann es jemand anderes öffnen.";
+
+    /// Does this page hold the lock on `name`?
+    fn holds(name: &str) -> bool {
+        LOCKS.with(|l| l.borrow().contains_key(name))
     }
 
     /// Does this page save designs on the file server?
@@ -163,8 +229,31 @@ mod web {
         pub size: u64,
         /// Last written (ms since 1970).
         pub modified_ms: f64,
-        /// Who has it open (M3 takes the locks; the list shows them already).
+        /// The version the list saw: a picture read from it is stale once this changes.
+        pub etag: String,
+        /// Who has it open.
         pub lock_owner: Option<String>,
+        /// That is the person at this page (in this or another window).
+        pub mine: bool,
+    }
+
+    /// A design fetched to be opened.
+    struct Opened {
+        /// Its path for the engine.
+        path: String,
+        /// Somebody has the design: this is a copy with no file of its own, and what to say
+        /// about it.
+        copy: Option<String>,
+    }
+
+    /// A design's picture for the start page, read from the design itself.
+    struct Preview {
+        /// The version it was read from.
+        etag: String,
+        /// The PNG inside the design; `None`: it has none (or it could not be fetched).
+        png: Option<Vec<u8>>,
+        /// The start page has been given it and keeps it as a texture.
+        sent: bool,
     }
 
     /// Save As: the name being typed, and the answer the app waits for.
@@ -189,8 +278,16 @@ mod web {
         save_ask: RefCell<Option<SaveAsk>>,
         /// The design being fetched to open.
         loading: RefCell<Option<String>>,
-        /// Designs fetched for opening (or open already in a tab): their engine paths.
-        opened: RefCell<Vec<String>>,
+        /// Designs fetched for opening (or open already in a tab).
+        opened: RefCell<Vec<Opened>>,
+        /// When the list was last fetched (ms since 1970), so the start page stays fresh.
+        listed_at: Cell<f64>,
+        /// Pictures for the start page, by design name.
+        previews: RefCell<HashMap<String, Preview>>,
+        /// One picture is being fetched (they go one at a time).
+        fetching_preview: Cell<bool>,
+        /// A lock the user asked to lift, waiting for the second click.
+        unlocking: RefCell<Option<String>>,
     }
 
     impl Cloud {
@@ -205,6 +302,10 @@ mod web {
                 save_ask: RefCell::default(),
                 loading: RefCell::default(),
                 opened: RefCell::default(),
+                listed_at: Cell::new(f64::NEG_INFINITY),
+                previews: RefCell::default(),
+                fetching_preview: Cell::new(false),
+                unlocking: RefCell::default(),
             }
         }
     }
@@ -275,8 +376,118 @@ mod web {
             if found {
                 log::info!("file server found: designs are opened from and saved to it");
                 refresh(&cloud);
+                start_heartbeat(&cloud);
+                release_on_unload();
             }
             cloud.files.wake();
+        });
+    }
+
+    /// Renew the locks this page holds every 20 s, whatever the window is doing: a design can be
+    /// open and untouched for minutes, and egui draws only when something happens.
+    fn start_heartbeat(cloud: &Rc<Cloud>) {
+        let Some(window) = web_sys::window() else { return };
+        let cloud = cloud.clone();
+        let beat = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || heartbeat(&cloud));
+        if window.set_interval_with_callback_and_timeout_and_arguments_0(beat.as_ref().unchecked_ref(), HEARTBEAT_MS).is_ok() {
+            // The timer lives as long as the page.
+            beat.forget();
+        }
+    }
+
+    /// Renew every lock. One the server does not know any more (it ran out while the notebook
+    /// slept, or the server was restarted) is taken again; where that fails the design belongs to
+    /// someone else now and the user is told, so the work can be saved under another name.
+    fn heartbeat(cloud: &Rc<Cloud>) {
+        let held: Vec<(String, String)> = LOCKS.with(|l| l.borrow().iter().map(|(name, token)| (name.clone(), token.clone())).collect());
+        for (name, token) in held {
+            let cloud = cloud.clone();
+            spawn_local(async move {
+                match call("PUT", &lock_url(&name), &[("X-Lock-Token", token.as_str())], None).await {
+                    Ok(r) if r.status != 409 => return,
+                    Err(e) => {
+                        log::info!("lock not renewed ({name}): {e}");
+                        return;
+                    }
+                    Ok(_) => {}
+                }
+                match lock(&name).await {
+                    Ok(None) => log::info!("lock taken again: {name}"),
+                    Ok(Some((owner, _))) => {
+                        LOCKS.with(|l| l.borrow_mut().remove(&name));
+                        cloud.files.say(lock_lost(&name, &owner), true);
+                        refresh(&cloud);
+                        cloud.files.wake();
+                    }
+                    Err(e) => log::info!("lock not taken again ({name}): {e}"),
+                }
+            });
+        }
+    }
+
+    /// Let go of every lock when the page goes away, so a closed tab doesn't keep designs locked
+    /// for a minute. After a crash the locks run out by themselves.
+    fn release_on_unload() {
+        let Some(window) = web_sys::window() else { return };
+        let going = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || {
+            let held: Vec<(String, String)> = LOCKS.with(|l| l.borrow_mut().drain().collect());
+            for (name, token) in held {
+                send_release(&name, &token);
+            }
+        });
+        let _ = window.add_event_listener_with_callback("pagehide", going.as_ref().unchecked_ref());
+        // The listener lives as long as the page.
+        going.forget();
+    }
+
+    /// Give up the lock on `name` with a request the browser finishes even as the page closes
+    /// (`keepalive`, which web-sys has no setter for).
+    fn send_release(name: &str, token: &str) {
+        let Some(window) = web_sys::window() else { return };
+        let init = web_sys::RequestInit::new();
+        init.set_method("DELETE");
+        init.set_credentials(web_sys::RequestCredentials::SameOrigin);
+        let _ = js_sys::Reflect::set(init.as_ref(), &JsValue::from_str("keepalive"), &JsValue::TRUE);
+        let Ok(headers) = web_sys::Headers::new() else { return };
+        if headers.set("X-Lock-Token", token).is_err() {
+            return;
+        }
+        init.set_headers(&headers);
+        let sent = window.fetch_with_str_and_init(&lock_url(name), &init);
+        spawn_local(async move {
+            let _ = JsFuture::from(sent).await;
+        });
+    }
+
+    /// Take the lock on `name`. `Ok(None)`: it is this page's now. `Ok(Some((owner, mine)))`:
+    /// somebody has the design open (`mine`: the same person, in another window).
+    async fn lock(name: &str) -> Result<Option<(String, bool)>, String> {
+        let r = call("POST", &lock_url(name), &[], None).await.map_err(|e| format!("Server nicht erreichbar: {e}"))?;
+        let v = r.json();
+        match r.status {
+            200 => match v["token"].as_str() {
+                Some(token) => {
+                    LOCKS.with(|l| l.borrow_mut().insert(name.to_string(), token.to_string()));
+                    Ok(None)
+                }
+                None => Err(format!("„{name}“ nicht gesperrt: Der Server nennt kein Token.")),
+            },
+            409 => Ok(Some((v["owner"].as_str().unwrap_or("jemand anderem").to_string(), v["mine"].as_bool() == Some(true)))),
+            s => Err(format!(
+                "„{name}“ nicht gesperrt: Der Server antwortet {s}{}",
+                v["error"].as_str().map(|e| format!(" ({e})")).unwrap_or_default()
+            )),
+        }
+    }
+
+    /// Let go of the lock on `name` (no tab shows the design any more).
+    fn release(name: &str) {
+        let Some(token) = LOCKS.with(|l| l.borrow_mut().remove(name)) else { return };
+        let url = lock_url(name);
+        spawn_local(async move {
+            if let Err(e) = call("DELETE", &url, &[("X-Lock-Token", token.as_str())], None).await {
+                log::info!("lock not released: {e}");
+            }
         });
     }
 
@@ -285,6 +496,7 @@ mod web {
         if cloud.listing.replace(true) {
             return;
         }
+        cloud.listed_at.set(js_sys::Date::now());
         let cloud = cloud.clone();
         spawn_local(async move {
             let r = call("GET", &format!("{API}designs"), &[], None).await;
@@ -302,7 +514,9 @@ mod web {
                                 name: d["name"].as_str()?.to_string(),
                                 size: d["size"].as_u64().unwrap_or(0),
                                 modified_ms: d["modified_ms"].as_f64().unwrap_or(0.0),
+                                etag: d["etag"].as_str().map(normalize_etag).unwrap_or_default(),
                                 lock_owner: d["lock"]["owner"].as_str().map(str::to_string),
+                                mine: d["lock"]["mine"].as_bool() == Some(true),
                             })
                         })
                         .collect();
@@ -326,18 +540,13 @@ mod web {
         });
     }
 
-    /// Fetch a design into the engine's files, remembering its ETag.
-    async fn fetch(name: &str) -> Result<String, String> {
+    /// Fetch a design's bytes and the ETag of the version that came.
+    async fn download(name: &str) -> Result<(Vec<u8>, Option<String>), String> {
         let r = call("GET", &design_url(name), &[], None).await.map_err(|e| format!("Server nicht erreichbar: {e}"))?;
         match r.status {
             200 => {
-                ETAGS.with(|t| match &r.etag {
-                    Some(tag) => t.borrow_mut().insert(name.to_string(), normalize_etag(tag)),
-                    None => t.borrow_mut().remove(name),
-                });
-                let p = path(name);
-                vfs::insert(&p, r.body);
-                Ok(p)
+                let tag = r.etag.as_deref().map(normalize_etag);
+                Ok((r.body, tag))
             }
             404 => Err(format!("„{name}“ gibt es auf dem Server nicht mehr.")),
             s => Err(format!(
@@ -345,6 +554,37 @@ mod web {
                 r.json()["error"].as_str().map(|e| format!(" ({e})")).unwrap_or_default()
             )),
         }
+    }
+
+    /// Open a design from the server: take its lock and put it into the engine's files, so saving
+    /// writes it back over the version that came (`If-Match`). Does somebody have it, the design
+    /// is opened as a **copy** with no file of its own: a save then asks for a new name and their
+    /// work stays as it is.
+    async fn fetch(cloud: &Rc<Cloud>, name: &str) -> Result<Opened, String> {
+        let held = lock(name).await?;
+        let fetched = download(name).await;
+        if fetched.is_err() && held.is_none() {
+            release(name);
+        }
+        let (bytes, tag) = fetched?;
+        // The start page shows this design: its picture comes free with the design.
+        if let Some(etag) = tag.clone() {
+            let png = solidcraft_engine::io::read_design_thumbnail(&bytes);
+            cloud.previews.borrow_mut().insert(name.to_string(), Preview { etag, png, sent: false });
+        }
+        let Some((owner, mine)) = held else {
+            ETAGS.with(|t| match tag {
+                Some(tag) => t.borrow_mut().insert(name.to_string(), tag),
+                None => t.borrow_mut().remove(name),
+            });
+            let p = path(name);
+            vfs::insert(&p, bytes);
+            return Ok(Opened { path: p, copy: None });
+        };
+        // A copy is kept in memory only (`disk::route`), and never written back to the server.
+        let p = format!("{}{name}", files::UPLOAD);
+        vfs::insert(&p, bytes);
+        Ok(Opened { path: p, copy: Some(copy_notice(name, &owner, mine)) })
     }
 
     /// Open (File > Open, the start page's Open): the list of designs on the server answers it.
@@ -378,18 +618,95 @@ mod web {
         picked(promise)
     }
 
-    /// A recent design on the server (after a reload): fetch it and open it.
+    /// A design on the server chosen on the start page, or a recent one after a reload: fetch it
+    /// and open it.
     pub fn restore(cloud: &Rc<Cloud>, engine_path: &str) {
         let Some(name) = parse(engine_path) else { return };
+        if cloud.loading.borrow().is_some() {
+            return;
+        }
+        *cloud.loading.borrow_mut() = Some(name.to_string());
         let (cloud, name, engine_path) = (cloud.clone(), name.to_string(), engine_path.to_string());
         spawn_local(async move {
-            match fetch(&name).await {
-                Ok(p) => cloud.opened.borrow_mut().push(p),
+            match fetch(&cloud, &name).await {
+                Ok(opened) => cloud.opened.borrow_mut().push(opened),
                 Err(e) => {
                     cloud.files.gone.borrow_mut().push(engine_path);
                     cloud.files.say(e, true);
                 }
             }
+            *cloud.loading.borrow_mut() = None;
+            cloud.files.wake();
+        });
+    }
+
+    // ---- the start page ------------------------------------------------------------------
+
+    /// The designs on the server for the start page (`Services::server_designs`), which shows
+    /// them in place of the built-in samples. The page asks for them while it is on screen, so
+    /// this is also where the list is kept fresh and the pictures are read.
+    pub fn home_designs(cloud: &Rc<Cloud>) -> Option<ServerDesigns> {
+        if !active() {
+            return None;
+        }
+        if js_sys::Date::now() - cloud.listed_at.get() > LIST_FRESH_MS {
+            refresh(cloud);
+        }
+        want_preview(cloud);
+        let entries = cloud.entries.borrow();
+        let mut previews = cloud.previews.borrow_mut();
+        let designs = entries
+            .iter()
+            .map(|e| {
+                let lock = e.lock_owner.as_ref().map(|owner| lock_text(owner, e.mine, holds(&e.name)));
+                let picture = previews.get_mut(&e.name).filter(|p| p.etag == e.etag && !p.sent).and_then(|p| {
+                    p.sent = true;
+                    p.png.clone()
+                });
+                ServerDesign { path: path(&e.name), detail: detail_text(lock.as_deref(), e.size, &local_time(e.modified_ms)), picture }
+            })
+            .collect();
+        // Shown while there are none: reading, not reachable, or really none yet.
+        let failed = cloud.list_error.borrow().clone();
+        let empty = match failed {
+            Some(e) => format!("Die Liste kam nicht: {e}"),
+            None if cloud.listing.get() => "Lese die Liste vom Server …".to_string(),
+            None => "Noch keine Designs auf dem Server. Mit „Speichern unter“ legst du eines an.".to_string(),
+        };
+        Some(ServerDesigns { title: "Designs auf dem Server".into(), empty, recent_label: "Auf dem Server".into(), prefix: PREFIX.into(), designs })
+    }
+
+    /// Read one design's picture for the start page: the picture sits inside the design, so each
+    /// one is fetched whole, one at a time and only up to [`PREVIEW_MAX_BYTES`].
+    fn want_preview(cloud: &Rc<Cloud>) {
+        if cloud.fetching_preview.get() || cloud.loading.borrow().is_some() || uploading() {
+            return;
+        }
+        let next = {
+            let entries = cloud.entries.borrow();
+            let previews = cloud.previews.borrow();
+            entries
+                .iter()
+                .find(|e| {
+                    !e.etag.is_empty() && e.size > 0 && e.size <= PREVIEW_MAX_BYTES && !previews.get(&e.name).is_some_and(|p| p.etag == e.etag)
+                })
+                .map(|e| (e.name.clone(), e.etag.clone()))
+        };
+        let Some((name, etag)) = next else { return };
+        cloud.fetching_preview.set(true);
+        let cloud = cloud.clone();
+        spawn_local(async move {
+            let png = match download(&name).await {
+                Ok((bytes, _)) => solidcraft_engine::io::read_design_thumbnail(&bytes),
+                Err(e) => {
+                    log::info!("no picture for {name}: {e}");
+                    None
+                }
+            };
+            // Kept under the version it was read from, so it is read again once that changes and
+            // a design it could not be read from is not fetched over and over.
+            cloud.previews.borrow_mut().insert(name, Preview { etag, png, sent: false });
+            cloud.fetching_preview.set(false);
             cloud.files.wake();
         });
     }
@@ -428,9 +745,14 @@ mod web {
     async fn upload(engine_path: &str, bytes: &[u8]) -> Result<String, String> {
         let name = parse(engine_path).ok_or("kein gültiger Name für den Server")?.to_string();
         let etag = ETAGS.with(|t| t.borrow().get(&name).cloned());
+        let token = LOCKS.with(|t| t.borrow().get(&name).cloned());
         let mut headers = vec![("Content-Type", "application/octet-stream")];
         if let Some(tag) = &etag {
             headers.push(("If-Match", tag.as_str()));
+        }
+        // Our own lock has to be shown too: the server takes a write only with its token.
+        if let Some(t) = &token {
+            headers.push(("X-Lock-Token", t.as_str()));
         }
         let r = call("PUT", &design_url(&name), &headers, Some(bytes))
             .await
@@ -444,6 +766,15 @@ mod web {
                     Some(tag) => t.borrow_mut().insert(name.clone(), tag),
                     None => t.borrow_mut().remove(&name),
                 });
+                // Saved under a new name (Save As): the design is open here now, so take its lock.
+                if token.is_none() {
+                    let name = name.clone();
+                    spawn_local(async move {
+                        if let Err(e) = lock(&name).await {
+                            log::info!("{e}");
+                        }
+                    });
+                }
                 Ok(name)
             }
             s => Err(save_failure(s, &name, v["error"].as_str(), v["owner"].as_str())),
@@ -458,14 +789,28 @@ mod web {
         if app.file_picker_busy() || !app.file_load.idle() {
             return;
         }
-        let opened: Vec<String> = cloud.opened.borrow_mut().drain(..).collect();
-        for p in opened {
+        let opened: Vec<Opened> = cloud.opened.borrow_mut().drain(..).collect();
+        for Opened { path: p, copy } in opened {
             match documents::find_path(app, &p) {
                 Some(i) => {
                     documents::switch(app, i);
                     app.home.open = false;
                 }
-                None => app.open_path(&p),
+                None => {
+                    app.open_path(&p);
+                    let Some(notice) = copy else { continue };
+                    // A copy of a design somebody has: it keeps no file, so Save asks for a name
+                    // on the server instead of writing over their work.
+                    if app.session.path.as_deref() == Some(p.as_str()) {
+                        app.session.path = None;
+                        let title = format!("{} (Kopie)", app.session.doc.name);
+                        app.session.doc_mut().name = title;
+                        app.session.mark_saved();
+                        app.home.recent.retain(|r| *r != p);
+                        app.home.opened_at.remove(&p);
+                    }
+                    cloud.files.say(notice, true);
+                }
             }
         }
         if cloud.loading.borrow().is_some() || uploading() {
@@ -476,7 +821,16 @@ mod web {
                 let _ = vfs::remove(&p);
                 if let Some(name) = parse(&p) {
                     ETAGS.with(|t| t.borrow_mut().remove(name));
+                    // Nobody here shows it any more: the others may have it.
+                    release(name);
                 }
+            }
+        }
+        // A lock whose design left the engine's files another way is let go of as well.
+        let held: Vec<String> = LOCKS.with(|l| l.borrow().keys().cloned().collect());
+        for name in held {
+            if !vfs::exists(&path(&name)) {
+                release(&name);
             }
         }
     }
@@ -551,10 +905,17 @@ mod web {
             let ready = cloud.loading.borrow().is_none();
             // The window's text is cut to fit; the list's names, dates and buttons are shown whole.
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            let asked = cloud.unlocking.borrow().clone();
             egui::Grid::new("cloud_designs").num_columns(5).striped(true).spacing([12.0, 6.0]).show(ui, |ui| {
                 for e in &entries {
+                    let here = holds(&e.name);
+                    let open_elsewhere = e.lock_owner.is_some() && !here;
                     ui.horizontal(|ui| {
-                        if ui_kit::button(ui, "Öffnen", ui_kit::Button::Enabled(ready)).clicked() {
+                        let open = ui_kit::button(ui, "Öffnen", ui_kit::Button::Enabled(ready));
+                        if open_elsewhere {
+                            open.clone().on_hover_text(COPY_HINT);
+                        }
+                        if open.clicked() {
                             act = Some(("open", e.name.clone()));
                         }
                         if ui_kit::button(ui, "Herunterladen", ui_kit::Button::Enabled(ready)).clicked() {
@@ -565,9 +926,28 @@ mod web {
                     ui.label(size_text(e.size));
                     ui.label(local_time(e.modified_ms));
                     match &e.lock_owner {
-                        Some(owner) => ui.weak(format!("geöffnet von {owner}")),
-                        None => ui.label(""),
-                    };
+                        Some(owner) => {
+                            ui.horizontal(|ui| {
+                                ui.weak(lock_text(owner, e.mine, here));
+                                if !open_elsewhere {
+                                    return;
+                                }
+                                if asked.as_deref() == Some(e.name.as_str()) {
+                                    if ui_kit::button(ui, "Wirklich aufheben", ui_kit::Button::Normal).clicked() {
+                                        act = Some(("force", e.name.clone()));
+                                    }
+                                    if ui_kit::button(ui, "Abbrechen", ui_kit::Button::Normal).clicked() {
+                                        act = Some(("keep", String::new()));
+                                    }
+                                } else if ui_kit::button(ui, "Sperre aufheben", ui_kit::Button::Normal).on_hover_text(FORCE_HINT).clicked() {
+                                    act = Some(("ask_force", e.name.clone()));
+                                }
+                            });
+                        }
+                        None => {
+                            ui.label("");
+                        }
+                    }
                     ui.end_row();
                 }
             });
@@ -579,6 +959,25 @@ mod web {
         let Some((what, name)) = act else { return };
         match what {
             "refresh" => refresh(cloud),
+            "ask_force" => *cloud.unlocking.borrow_mut() = Some(name),
+            "keep" => *cloud.unlocking.borrow_mut() = None,
+            "force" => {
+                *cloud.unlocking.borrow_mut() = None;
+                let cloud = cloud.clone();
+                spawn_local(async move {
+                    let lifted = match call("DELETE", &format!("{}?force=1", lock_url(&name)), &[], None).await {
+                        Ok(r) if r.status == 204 || r.status == 200 => Ok(()),
+                        Ok(r) => Err(format!("Der Server antwortet {}", r.status)),
+                        Err(e) => Err(format!("Server nicht erreichbar ({e})")),
+                    };
+                    match lifted {
+                        Ok(()) => cloud.files.say(format!("Die Sperre für „{name}“ ist aufgehoben."), false),
+                        Err(e) => cloud.files.say(format!("Die Sperre für „{name}“ blieb: {e}."), true),
+                    }
+                    refresh(&cloud);
+                    cloud.files.wake();
+                });
+            }
             "browser" => {
                 close_panel(cloud);
                 cloud.files.panel.set(true);
@@ -609,18 +1008,24 @@ mod web {
                 // Open already: its tab, not a second copy that would save over it.
                 if documents::find_path(app, &p).is_some() {
                     close_panel(cloud);
-                    cloud.opened.borrow_mut().push(p);
+                    cloud.opened.borrow_mut().push(Opened { path: p, copy: None });
                     return;
                 }
                 *cloud.loading.borrow_mut() = Some(name.clone());
                 let cloud = cloud.clone();
                 spawn_local(async move {
-                    match fetch(&name).await {
-                        Ok(p) => {
+                    match fetch(&cloud, &name).await {
+                        Ok(opened) => {
                             cloud.panel.set(false);
+                            // A copy has no file: an Open waiting for a path is answered with the
+                            // copy's, and the tab lets go of it (see `tick`).
                             match cloud.picking.borrow_mut().take() {
-                                Some(f) => resolve(&f, Some(&p)),
-                                None => cloud.opened.borrow_mut().push(p),
+                                Some(f) if opened.copy.is_none() => resolve(&f, Some(&opened.path)),
+                                Some(f) => {
+                                    resolve(&f, None);
+                                    cloud.opened.borrow_mut().push(opened);
+                                }
+                                None => cloud.opened.borrow_mut().push(opened),
                             }
                         }
                         Err(e) => {
@@ -780,6 +1185,41 @@ mod tests {
         assert!(save_failure(423, "Halter.solidcraft", Some("Gesperrt"), Some("alice")).contains("gesperrt von alice"));
         assert!(save_failure(413, "Halter.solidcraft", None, None).contains("zu groß"));
         assert!(save_failure(500, "Halter.solidcraft", Some("Interner Fehler"), None).contains("500 (Interner Fehler)"));
+    }
+
+    /// A lock lives under the design it belongs to, with the same percent-encoded name.
+    #[test]
+    fn a_locks_url_is_the_designs_url_and_lock() {
+        assert_eq!(lock_url("Mein Gehäuse (2).solidcraft"), "/api/designs/Mein%20Geh%C3%A4use%20%282%29.solidcraft/lock");
+        assert_eq!(lock_url("A.solidcraft"), format!("{}/lock", design_url("A.solidcraft")));
+    }
+
+    /// The list says who has a design: this window, you somewhere else (a second tab locks too),
+    /// or someone in the team.
+    #[test]
+    fn a_lock_says_whether_it_is_yours_and_whether_it_is_this_window() {
+        assert_eq!(lock_text("alice", true, true), "hier geöffnet");
+        assert_eq!(lock_text("alice", true, false), "von dir in einem anderen Fenster geöffnet");
+        assert_eq!(lock_text("bob", false, false), "geöffnet von bob");
+    }
+
+    /// Opening a design somebody has gives a copy: the message names them and says that the
+    /// changes are kept under a new name, never written over theirs.
+    #[test]
+    fn a_copy_says_who_has_the_design_and_how_to_keep_the_changes() {
+        let theirs = copy_notice("Halter.solidcraft", "bob", false);
+        assert!(theirs.contains("von bob geöffnet") && theirs.contains("Kopie") && theirs.contains("Speichern unter"));
+        let mine = copy_notice("Halter.solidcraft", "alice", true);
+        assert!(mine.contains("in einem anderen Fenster") && mine.contains("Speichern unter"));
+        assert!(lock_lost("Halter.solidcraft", "bob").contains("abgelaufen") && lock_lost("Halter.solidcraft", "bob").contains("bob"));
+    }
+
+    /// The start page says who has a design, or how big it is, and when it was last written.
+    #[test]
+    fn the_start_pages_line_says_who_has_it_or_how_big_it_is() {
+        assert_eq!(detail_text(Some("geöffnet von bob"), 2048, "21.10.2026, 09:00"), "geöffnet von bob · 21.10.2026, 09:00");
+        assert_eq!(detail_text(None, 2048, "21.10.2026, 09:00"), "2.0 KB · 21.10.2026, 09:00");
+        assert_eq!(detail_text(None, 2048, ""), "2.0 KB");
     }
 
     #[test]
