@@ -995,8 +995,9 @@ mod tests {
         other.name = "Same triangles, separate appearance".into();
         other.color = None;
         doc.add_feature(FeatureKind::MeshImport { file: "example.obj".into(), meshes: vec![mesh(), other] }, None).unwrap();
+        let id = doc.allocate_id().unwrap();
         doc.canvases.push(solidcraft_doc::canvas::Canvas {
-            id: 99,
+            id,
             name: "Reference".into(),
             format: "png".into(),
             data: solidcraft_doc::canvas::base64_encode(b"original image bytes"),

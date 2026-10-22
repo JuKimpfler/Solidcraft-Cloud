@@ -15,6 +15,29 @@ fn occ(s: &Session, component: &str) -> u64 {
     s.doc.occurrence_of(c).map(|o| o.id).unwrap_or(0)
 }
 
+#[test]
+fn deleted_motion_item_ids_are_not_reused_after_reopening() {
+    for (create, delete, key, params) in [
+        ("contact.create", "contact.edit", "set", json!({"occurrences": ["A", "B"]})),
+        ("motion.study", "motion.delete", "study", json!({"name": "Travel", "steps": 10})),
+        ("explode.create", "explode.delete", "view", json!({"moves": [{"occurrence": "B", "translate": [20, 0, 0]}]})),
+    ] {
+        let mut s = Session::default();
+        for name in ["A", "B"] {
+            run(&mut s, "component.activate", json!({"component": "root"}));
+            run(&mut s, "component.create", json!({"name": name}));
+        }
+        let first = run(&mut s, create, params.clone())[key].as_u64().unwrap();
+        let deletion = json!({key: first, "delete": true});
+        run(&mut s, delete, deletion.clone());
+        let doc = solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap();
+        *s.doc_mut() = doc;
+        let second = run(&mut s, create, params)[key].as_u64().unwrap();
+        assert!(second > first, "{create}: deleted item {first} was reused as {second}");
+        assert!(s.execute(delete, &deletion).is_err());
+    }
+}
+
 /// Where B's corner (20, 0, 0) is now.
 fn b_x(s: &Session) -> f64 {
     super::world_point(s, occ(s, "B"), Vec3::new(20.0, 0.0, 0.0)).x

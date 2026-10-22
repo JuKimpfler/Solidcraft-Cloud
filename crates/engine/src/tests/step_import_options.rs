@@ -64,6 +64,25 @@ fn total_volume(s: &mut Session) -> f64 {
     run(s, "inspect.measure", json!({}))["total"]["volume_mm3"].as_f64().unwrap()
 }
 
+#[test]
+fn imported_joints_do_not_reuse_deleted_ids() {
+    let path = frame_file("joint-ids");
+    let mut s = Session::default();
+    run(&mut s, "file.insert_step", json!({"path": path}));
+    let first: Vec<_> = s.doc.assembly.joints.iter().map(|j| j.id).collect();
+    assert!(!first.is_empty());
+    for id in &first {
+        run(&mut s, "joint.delete", json!({"joint": id}));
+    }
+    run(&mut s, "component.activate", json!({"component": "root"}));
+    run(&mut s, "file.insert_step", json!({"path": path}));
+    assert!(!s.doc.assembly.joints.is_empty());
+    for joint in &s.doc.assembly.joints {
+        assert!(!first.contains(&joint.id), "import reused deleted joint {}", joint.id);
+        assert!(joint.id < s.doc.next_id, "import did not reserve joint {}", joint.id);
+    }
+}
+
 /// `up: "y"` turns the file's bodies a quarter turn about X, Y becoming Z: the frame's height
 /// lies along Z, and what was its depth now runs towards -Y.
 #[test]
