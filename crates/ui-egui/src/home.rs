@@ -739,6 +739,17 @@ fn start_content(app: &mut SolveApp, ui: &mut egui::Ui, action: &mut Option<File
         }
         ui.add_space(t.file_section_gap);
     }
+    // SolidCraft_Cloud: with the team's file server, its designs take the built-in samples' place.
+    let mut server = app.services.server_designs.as_ref().and_then(|designs| designs());
+    if let Some(list) = server.as_mut() {
+        for design in &mut list.designs {
+            if let Some(png) = design.picture.take()
+                && let Some(img) = decode_thumbnail(png)
+            {
+                install(&mut app.home, ui.ctx(), &design.path, Some(img));
+            }
+        }
+    }
     let shortcut = if cfg!(target_os = "macos") { "⌘O" } else { "Ctrl+O" };
     let open_hint = crate::i18n::format("home.open_hint", &[("shortcut", shortcut)]);
     let tiles = [
@@ -763,6 +774,10 @@ fn start_content(app: &mut SolveApp, ui: &mut egui::Ui, action: &mut Option<File
         });
     });
     ui.add_space(t.file_section_gap);
+    if let Some(list) = server.as_ref() {
+        server_section(app, ui, list);
+        ui.add_space(t.file_section_gap);
+    }
     FileView::section(ui, app.tr("home.recent"), t.space_10, |ui| {
         if app.home.recent.is_empty() {
             FileView::detail(ui, app.tr("home.recent_empty"));
@@ -773,8 +788,12 @@ fn start_content(app: &mut SolveApp, ui: &mut egui::Ui, action: &mut Option<File
                     let name = std::path::Path::new(path).file_stem().map(|name| name.to_string_lossy()).unwrap_or_else(|| path.as_str().into());
                     let missing = !available(app, path);
                     let when = if app.session.path.as_ref() == Some(path) { app.tr("home.open_now").to_string() } else { recent_time(app, path) };
+                    // SolidCraft_Cloud: everyone in the team opens this one from the same place.
+                    let on_server = server.as_ref().filter(|list| path.starts_with(&list.prefix));
                     let shown_path = if missing {
                         format!("{} · {}", app.tr("home.missing"), friendly_path(path))
+                    } else if let Some(list) = on_server {
+                        list.recent_label.clone()
                     } else if path.starts_with("/disk/") {
                         app.tr_label("On your computer").to_string()
                     } else if path.starts_with("/opfs/") {
@@ -815,6 +834,9 @@ fn start_content(app: &mut SolveApp, ui: &mut egui::Ui, action: &mut Option<File
             });
         }
     });
+    if server.is_some() {
+        return;
+    }
     ui.add_space(t.file_section_gap);
     FileView::section(ui, app.tr("home.samples"), t.space_10, |ui| {
         let samples: Vec<_> = solidcraft_engine::sample::samples()
@@ -837,6 +859,50 @@ fn start_content(app: &mut SolveApp, ui: &mut egui::Ui, action: &mut Option<File
             }
         }
     });
+}
+
+/// SolidCraft_Cloud: the designs on the team's file server, in the samples' place. Choosing one
+/// opens it the way a recent design opens: the host fetches it (and takes its lock).
+fn server_section(app: &mut SolveApp, ui: &mut egui::Ui, list: &crate::ServerDesigns) {
+    let t = Tokens::get();
+    FileView::section(ui, &list.title, t.space_10, |ui| {
+        if list.designs.is_empty() {
+            FileView::detail(ui, &list.empty);
+            return;
+        }
+        let titles: Vec<String> = list.designs.iter().map(|design| design_title(&design.path)).collect();
+        let cards: Vec<ui_kit::SampleCard<'_>> = titles
+            .iter()
+            .zip(&list.designs)
+            .map(|(title, design)| ui_kit::SampleCard {
+                title: title.as_str(),
+                description: design.detail.as_str(),
+                icon: "box",
+                thumbnail: texture(app.home.thumbs.get(&design.path).and_then(Option::as_ref)),
+            })
+            .collect();
+        for (index, response) in FileView::sample_grid(ui, "home:server", &cards).into_iter().enumerate() {
+            publish(&format!("home:server:{index}"), &response);
+            if let Some(design) = list.designs.get(index) {
+                response.clone().on_hover_text(&design.path);
+                if response.clicked() {
+                    // Open already: its tab, not a second copy that would save over it.
+                    match crate::documents::find_path(app, &design.path) {
+                        Some(index) => {
+                            crate::documents::switch(app, index);
+                            app.home.open = false;
+                        }
+                        None => open_recent(app, &design.path),
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// A design's name for a card: its file name without the extension.
+fn design_title(path: &str) -> String {
+    std::path::Path::new(path).file_stem().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string())
 }
 
 fn texture(texture: Option<&egui::TextureHandle>) -> Option<(egui::TextureId, egui::Vec2)> {
@@ -1305,6 +1371,34 @@ mod tests {
         h.app.keymap.open = true;
         h.frames(2);
         assert!(shown(&h) && h.app.prefs_window.section == crate::prefs::PAGE_SHORTCUTS && h.app.home.open);
+    }
+
+    /// SolidCraft_Cloud: with the team's file server the start page lists its designs in the
+    /// samples' place, choosing one asks the host for it (which takes its lock), and a recent
+    /// design on the server says where it is instead of showing its engine path.
+    #[test]
+    fn file_view_lists_the_servers_designs_instead_of_the_samples() {
+        let mut h = crate::scenario::Harness::new();
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let sink = asked.clone();
+        h.app.services.can_restore = Some(Box::new(|path| path.starts_with("/server/")));
+        h.app.services.restore_file = Some(Box::new(move |path: &str| sink.borrow_mut().push(path.to_string())));
+        h.app.services.server_designs = Some(Box::new(|| {
+            Some(crate::ServerDesigns {
+                title: "Designs auf dem Server".into(),
+                empty: "Noch keine Designs auf dem Server.".into(),
+                recent_label: "Auf dem Server".into(),
+                prefix: "/server/".into(),
+                designs: vec![crate::ServerDesign { path: "/server/Halter.solidcraft".into(), detail: "geöffnet von alice".into(), picture: None }],
+            })
+        }));
+        h.app.home.add_recent("/server/Halter.solidcraft");
+        h.app.home.show(h.app.session.revision);
+        click_file(&mut h, "home:server:0");
+        assert_eq!(*asked.borrow(), ["/server/Halter.solidcraft"], "the host fetches the design");
+        assert!(h.step(&serde_json::json!({"click": {"handle": "home:sample:0"}})).is_err(), "no samples while the server answers");
+        click_file(&mut h, "home:recent:0");
+        assert_eq!(asked.borrow().len(), 2, "a recent design on the server is fetched the same way");
     }
 
     fn click_file(h: &mut crate::scenario::Harness, id: &str) {

@@ -585,6 +585,7 @@ mod web {
                         let (panel, opener, saver, shown) = (files.clone(), files.clone(), files.clone(), files.clone());
                         let (restorable, restorer) = (files.clone(), files.clone());
                         let (cloud_open, cloud_save, cloud_restore, cloud_shown) = (cloud.clone(), cloud.clone(), cloud.clone(), cloud.clone());
+                        let cloud_home = cloud.clone();
                         let services = Services {
                             // Open shows the browser's open dialog for a design where it has one
                             // (the file keeps its handle, so Save writes back to it); otherwise,
@@ -637,6 +638,9 @@ mod web {
                                     shown.panel.set(true);
                                 }
                             })),
+                            // SolidCraft_Cloud: with the file server, the start page shows the
+                            // team's designs instead of the built-in samples.
+                            server_designs: Some(Box::new(move || server::home_designs(&cloud_home))),
                             install_app: Some(crate::install::service(&cc.egui_ctx)),
                             ..Default::default()
                         };

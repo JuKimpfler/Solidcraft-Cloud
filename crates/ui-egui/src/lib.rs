@@ -319,6 +319,30 @@ impl Default for UiState {
     }
 }
 
+/// SolidCraft_Cloud: a design on the team's file server, as the start page shows it.
+pub struct ServerDesign {
+    /// Its engine path (`/server/<name>`): choosing it goes through `restore_file`.
+    pub path: String,
+    /// One line under the name: who has it open, how old it is — the host's words.
+    pub detail: String,
+    /// A picture of the design (PNG bytes, as `read_design_thumbnail` reads them), handed over
+    /// once when it has arrived; `None` on the frames after that, where the page keeps its own.
+    pub picture: Option<Vec<u8>>,
+}
+
+/// SolidCraft_Cloud: what the start page shows instead of the built-in samples when the team's
+/// file server answers. The texts come from the host, so this crate stays language-neutral.
+pub struct ServerDesigns {
+    pub title: String,
+    /// Shown instead of the list while the server has no designs.
+    pub empty: String,
+    /// What a recent design on the server is called in its row ("On the team's server").
+    pub recent_label: String,
+    /// The engine path prefix of designs on the server (`/server/`).
+    pub prefix: String,
+    pub designs: Vec<ServerDesign>,
+}
+
 /// Host services injected by the app so this crate stays portable.
 #[derive(Default)]
 pub struct Services {
@@ -352,6 +376,10 @@ pub struct Services {
     pub restore_file: Option<Box<dyn Fn(&str)>>,
     /// Show the designs the browser keeps for itself; None: the host has no such store.
     pub browser_files: Option<Box<dyn Fn()>>,
+    /// SolidCraft_Cloud: the designs on the team's file server, for the start page. Called while
+    /// that page is on screen (the host may fetch their pictures from it). `None`, or `None` from
+    /// the call: no file server, so the built-in samples are shown as usual.
+    pub server_designs: Option<Box<dyn Fn() -> Option<ServerDesigns>>>,
     /// HTTP for the agent chat's API agents (OpenAI-compatible endpoints); None: no API agents.
     pub agent_http: Option<agent_chat::backend::HttpFn>,
     /// The system keychain, for API agents' keys; None: keys can't be stored.

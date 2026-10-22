@@ -22,7 +22,8 @@ einen Raspberry Pi 5 hinter Apache.
 
 Unser Code liegt in **`cloud/`**, damit er sich nicht mit Upstream-Dateien überschneidet.
 Änderungen an SolidCraft selbst sind bewusst klein und auf wenige Dateien beschränkt
-(`apps/solidcraft-web/src/`, `crates/ui-egui/src/home.rs`, eine Hilfsfunktion in
+(`apps/solidcraft-web/src/`, `crates/ui-egui/src/home.rs`, ein Dienst in
+`crates/ui-egui/src/lib.rs` und eine Hilfsfunktion in
 `crates/ui-egui/src/documents.rs`). Unser Code in der Web-Hülle steht in
 `apps/solidcraft-web/src/server.rs`; in den Upstream-Dateien sind die Eingriffe mit
 „SolidCraft_Cloud“ kommentiert. Das README im Wurzelordner und
@@ -41,8 +42,8 @@ Unser Code liegt in **`cloud/`**, damit er sich nicht mit Upstream-Dateien über
 | M0 | Fork, Projektgerüst, unverändertes Web-Image auf dem Pi | Image baut in CI, Test auf dem Pi steht aus |
 | M1 | Datei-Server | fertig und getestet, Einsatz auf dem Pi steht aus |
 | M2 | Client-Anbindung (Öffnen/Speichern über den Server) | fertig, im Browser gegen den Datei-Server getestet; Einsatz auf dem Pi steht aus |
-| M3 | Sperren in der App | offen |
-| M4 | Startseite mit Server-Designs | offen |
+| M3 | Sperren in der App | Code fertig; Test im Browser steht aus |
+| M4 | Startseite mit Server-Designs | Code fertig; Test im Browser steht aus |
 | M5 | Automatische Updates (Upstream-Abgleich) | offen |
 
 ## Web-Image (M0)
