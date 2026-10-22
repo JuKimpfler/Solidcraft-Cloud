@@ -75,7 +75,7 @@ durchgehen. Getestet ist der Server selbst (siehe unten), nicht seine Einbindung
    WantedBy=multi-user.target
    ```
    Dann `sudo systemctl enable --now solidcraft-cloud-server`.
-4. Apache (Module `proxy`, `proxy_http`, `headers`, `rewrite`, `auth_basic`; `htpasswd -c
+4. Apache (Module `proxy`, `proxy_http`, `headers`, `rewrite`, `setenvif`, `auth_basic`; `htpasswd -c
    /etc/apache2/solidcraft.htpasswd alice`). In den bestehenden HTTPS-VirtualHost der Subdomain:
    ```apache
    <Location />
@@ -91,6 +91,9 @@ durchgehen. Getestet ist der Server selbst (siehe unten), nicht seine Einbindung
    RewriteCond %{LA-U:REMOTE_USER} (.+)
    RewriteRule .* - [E=PROXY_USER:%1,NS]
    RequestHeader set X-Remote-User "%{PROXY_USER}e" env=PROXY_USER
+
+   # Antworten des Datei-Servers nicht komprimieren: der ETag bleibt so, wie der Server ihn setzt.
+   SetEnvIf Request_URI "^/api/" no-gzip=1 no-brotli=1
 
    LimitRequestBody 268435456
    ProxyTimeout 300
@@ -127,8 +130,9 @@ curl -X PUT  -H 'X-Remote-User: bob' -H 'If-Match: "…"' --data-binary x "$B/de
   Benutzern und Sperre, Chunked-Upload ohne `Content-Length`, 150-MB-Datei hoch und herunter
   (Prüfsumme identisch, 0,4 s über Loopback, **Spitzen-RSS des Servers 3 MB**, weil gestreamt wird),
   Liste und kleine Speichervorgänge während des großen Uploads ohne Wartezeit.
-- **Nicht getestet:** Betrieb auf dem Pi (arm64), Apache-Einbindung, Nextcloud-Einbindung,
-  Zusammenspiel mit der App (kommt mit M2).
+- Zusammenspiel mit der App (M2): im Browser (Chromium) gegen diesen Server hinter einem
+  Test-Proxy mit Basic Auth, zwei Benutzer, siehe `cloud/ARCHITECTURE.md`.
+- **Nicht getestet:** Betrieb auf dem Pi (arm64), Apache-Einbindung, Nextcloud-Einbindung.
 
 ## Bekannte Grenzen
 

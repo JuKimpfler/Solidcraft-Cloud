@@ -31,4 +31,6 @@ web-sys = { version = "0.3", features = [
     "WritableStream", "File", "FileList", "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "HtmlInputElement", "Storage",
     "IdbFactory", "IdbDatabase", "IdbObjectStore", "IdbOpenDbRequest", "IdbRequest", "IdbTransaction", "IdbTransactionMode",
     "BeforeUnloadEvent", "Event", "EventTarget", "Response", "MediaQueryList", "Gamepad", "Performance",
+    # SolidCraft_Cloud: the file server (src/server.rs).
+    "Headers", "RequestInit", "RequestCache", "RequestCredentials",
 ] }

@@ -1,6 +1,6 @@
 # Architektur (Entwurf)
 
-Stand: Meilenstein M0. Alles ab hier ist Plan und wird mit M1 bis M4 konkretisiert.
+Stand: Meilenstein M2. Datei-Server (M1) und Client-Anbindung (M2) sind umgesetzt, Sperren in der App (M3) und die Startseite (M4) sind noch Plan.
 
 ## Überblick
 
@@ -50,6 +50,46 @@ die Beispiele fest einkompiliert und `MAX_RECENT = 12` Einträge für „Recent 
   einer Änderung von außen (z. B. durch Nextcloud).
 - **Benutzer:** Der Name kommt im Header `X-Remote-User` vom Reverse Proxy (Apache) nach der
   Anmeldung, nie vom Client. Der Server vertraut ihm blind und lauscht deshalb nur lokal.
+
+## Client-Anbindung (umgesetzt in M2, `apps/solidcraft-web/src/server.rs`)
+
+- **Erkennung:** Beim Start fragt die App `GET /api/health` auf ihrer eigenen Domain. Antwortet dort
+  der Datei-Server (`{"ok": true}`), laufen Öffnen und „Speichern unter“ über ihn. Sonst verhält
+  sich die App genau wie Upstream (Browser-Speicher, Dateien auf dem Computer).
+- **Pfade:** Ein Design auf dem Server heißt für die Engine `/server/<Name>`. Beim Öffnen wird es
+  geladen und in die virtuellen Dateien der Engine gelegt; `files::flush` schickt, was ein
+  Speichern dorthin schreibt, per `PUT` an den Server. Der CAD-Kern bleibt unberührt.
+- **Öffnen** (Datei > Öffnen, Startseite, Strg+O) zeigt die Liste der Designs auf dem Server. Von
+  dort geht es auch zu „Vom Computer öffnen…“ und zu den Dateien im Browser. Ist ein Design schon
+  in einem Tab offen, wechselt die App zu diesem Tab, statt eine zweite Kopie zu laden.
+- **Speichern unter** fragt nach einem Namen auf dem Server (`.solidcraft` wird ergänzt). Namen,
+  die es schon gibt, lehnt der Dialog ab: Überschreiben geht nur über „Speichern“ des geladenen
+  Designs. Exporte (STEP, STL, …) werden wie bisher heruntergeladen.
+- **Speichern** schickt den ETag mit, mit dem das Design geladen oder zuletzt gespeichert wurde
+  (`If-Match`). Hat jemand anderes es inzwischen geändert (`412`), gibt es schon eine Datei mit dem
+  Namen (`428`) oder ist es gesperrt (`423`), bleibt das Design als ungespeichert markiert, und die
+  Statuszeile sagt, was los ist und dass „Speichern unter“ die Änderungen rettet. Speichervorgänge
+  laufen nacheinander; solange einer läuft, fragt der Browser vor dem Schließen des Tabs nach.
+- **Nur im Speicher, solange offen:** Ein Server-Design bleibt nur so lange in der App, wie ein Tab
+  es zeigt. Erneutes Öffnen (auch über „Zuletzt verwendet“) lädt die aktuelle Version vom Server.
+- **ETag hinter Apache:** Komprimiert Apache eine Antwort, hängt es `-gzip` an den ETag. Die App
+  nimmt den ETag deshalb aus der JSON-Antwort des Servers und entfernt solche Zusätze.
+- **Ohne Server** (Seite ohne `/api/`) fragt die App einmal `/api/health`, bekommt `404` und
+  verhält sich wie Upstream.
+- **Grenzen in M2:** Sperren nimmt die App noch nicht (kommt mit M3); die Liste zeigt aber schon,
+  wer ein Design gesperrt hat. Auch „Einfügen STEP…“ zeigt die Server-Liste zuerst, von dort führt
+  „Vom Computer öffnen…“ zum gewohnten Dialog. Die Texte unserer Fenster sind deutsch, unabhängig
+  von der Sprache der App. Vorschaubilder der Server-Designs auf der Startseite kommen mit M4.
+
+**Getestet** (Chromium unter Xvfb, Web-Build gegen den Datei-Server hinter einem Test-Proxy mit Basic
+Auth, zwei Benutzer `alice` und `bob`): neues Design per „Speichern“ → Namensdialog → `201`;
+erneutes Speichern mit `If-Match` → `200`; `bob` öffnet es aus der Liste und speichert → `200`;
+danach speichert `alice` ihren alten Stand → `412`, Hinweis in der Statuszeile, Tab bleibt
+ungespeichert; „Speichern unter“ mit neuem Namen rettet die Änderungen; ein vorhandener Name (auch
+in anderer Schreibweise) wird im Dialog abgelehnt; Öffnen eines schon offenen Designs wechselt nur den
+Tab (kein zweiter Download); nach Neuladen der Seite öffnet der Eintrag unter „Zuletzt verwendet“
+die aktuelle Version vom Server; ohne Datei-Server bleibt die App beim Upstream-Verhalten. Die
+Namens-, URL- und ETag-Logik ist zusätzlich mit Unit-Tests abgedeckt (`cargo test -p solidcraft-web`).
 
 ## Sperren
 

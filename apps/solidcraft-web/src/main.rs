@@ -15,6 +15,8 @@ mod files;
 #[cfg(target_arch = "wasm32")]
 mod install;
 #[cfg(any(target_arch = "wasm32", test))]
+mod server;
+#[cfg(any(target_arch = "wasm32", test))]
 mod space_mouse;
 
 #[cfg(target_arch = "wasm32")]
@@ -29,6 +31,7 @@ mod web {
     use crate::api::Api;
     use crate::disk::{self, SaveTarget};
     use crate::files::{self, Files, Intent};
+    use crate::server::{self, Cloud};
     use crate::space_mouse::SpaceMouse;
 
     const CANVAS_ID: &str = "solidcraft_canvas";
@@ -92,6 +95,8 @@ mod web {
         app: SolveApp,
         api: Api,
         files: Rc<Files>,
+        /// SolidCraft_Cloud: designs on the file server.
+        cloud: Rc<Cloud>,
         /// When the last autosave was (seconds), and the revision it holds (none stored: `None`).
         autosaved_at: f64,
         autosaved: Option<u64>,
@@ -210,7 +215,8 @@ mod web {
             let recent = &mut self.app.home.recent;
             let known = self.files.disk_known.borrow().clone();
             // A design on the computer's disk stays listed while its file is remembered.
-            recent.retain(|p| vfs::exists(p) || disk::parse(p).is_some_and(|(id, _)| known.contains(id)));
+            // So does one on the file server (opening it fetches it).
+            recent.retain(|p| vfs::exists(p) || disk::parse(p).is_some_and(|(id, _)| known.contains(id)) || server::parse(p).is_some());
             for e in entries.iter().filter(|e| solidcraft_engine::io::is_design_path(&e.name)) {
                 let p = format!("{}{}", files::OPFS, e.name);
                 if !recent.contains(&p) {
@@ -484,7 +490,8 @@ mod web {
             self.api.poll();
             self.space_mouse.logic(&mut self.app, ctx);
             self.files_tick(ctx);
-            UNSAVED.with(|u| u.set(solidcraft_ui_egui::documents::any_dirty(&self.app)));
+            server::tick(&mut self.app, &self.cloud);
+            UNSAVED.with(|u| u.set(solidcraft_ui_egui::documents::any_dirty(&self.app) || server::uploading()));
         }
         fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
             files::take_drops(&self.files, raw);
@@ -496,6 +503,7 @@ mod web {
             self.app.ui(ui);
             let ctx = ui.ctx().clone();
             self.file_panel(&ctx);
+            server::ui(&mut self.app, &ctx, &self.cloud);
             self.recovery_prompt(&ctx);
             self.watch_text_for_font(&ctx);
         }
@@ -572,13 +580,20 @@ mod web {
                         solidcraft_ui_egui::fonts::setup_fonts(&cc.egui_ctx);
                         let files = Rc::new(Files::default());
                         files::start(&files);
+                        let cloud = Rc::new(Cloud::new(files.clone()));
+                        server::start(&cloud);
                         let (panel, opener, saver, shown) = (files.clone(), files.clone(), files.clone(), files.clone());
                         let (restorable, restorer) = (files.clone(), files.clone());
+                        let (cloud_open, cloud_save, cloud_restore, cloud_shown) = (cloud.clone(), cloud.clone(), cloud.clone(), cloud.clone());
                         let services = Services {
                             // Open shows the browser's open dialog for a design where it has one
                             // (the file keeps its handle, so Save writes back to it); otherwise,
                             // and for inserting STEP or meshes, the browser's files window.
                             pick_open: Some(Box::new(move |exts: &[&str]| {
+                                // With the file server, the list of designs on it.
+                                if server::active() && disk::opens_design(exts) {
+                                    return Box::pin(server::pick_open(&cloud_open));
+                                }
                                 if disk::handles_open(exts) {
                                     return Box::pin(disk::pick_open(&opener));
                                 }
@@ -589,6 +604,9 @@ mod web {
                             // where the browser can't pick one; everything else is downloaded.
                             pick_save: Some(Box::new(move |name: &str, exts: &[&str]| {
                                 let design = exts.contains(&solidcraft_engine::io::DESIGN_EXT);
+                                if server::active() && design {
+                                    return Box::pin(server::pick_save(&cloud_save, name));
+                                }
                                 match disk::save_target(disk::supported(), design) {
                                     SaveTarget::Disk => Box::pin(disk::pick_save(&saver, name)),
                                     SaveTarget::Browser => {
@@ -602,10 +620,23 @@ mod web {
                             // the browser for its remembered file.
                             can_restore: Some(Box::new(move |path: &str| {
                                 disk::parse(path).is_some_and(|(id, _)| restorable.disk_known.borrow().contains(id))
+                                    || (server::active() && server::parse(path).is_some())
                             })),
-                            restore_file: Some(Box::new(move |path: &str| disk::restore(&restorer, path))),
+                            restore_file: Some(Box::new(move |path: &str| {
+                                if server::parse(path).is_some() {
+                                    server::restore(&cloud_restore, path);
+                                } else {
+                                    disk::restore(&restorer, path);
+                                }
+                            })),
                             download_design: Some(Box::new(files::download)),
-                            browser_files: Some(Box::new(move || shown.panel.set(true))),
+                            browser_files: Some(Box::new(move || {
+                                if server::active() {
+                                    server::show(&cloud_shown);
+                                } else {
+                                    shown.panel.set(true);
+                                }
+                            })),
                             install_app: Some(crate::install::service(&cc.egui_ctx)),
                             ..Default::default()
                         };
@@ -640,6 +671,7 @@ mod web {
                             app,
                             api,
                             files,
+                            cloud,
                             autosaved_at: f64::NEG_INFINITY,
                             autosaved: None,
                             renaming: None,

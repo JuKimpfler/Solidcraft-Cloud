@@ -184,6 +184,15 @@ pub fn active_is_blank(app: &SolveApp) -> bool {
     s.path.is_none() && s.doc.features.is_empty() && s.doc.params.is_empty() && s.doc.components.is_empty() && !s.is_dirty()
 }
 
+/// The tab showing the design kept at `path`, if one is open (a host that reloads a file before
+/// opening it switches to that tab instead, so two tabs never save over each other).
+pub fn find_path(app: &SolveApp, path: &str) -> Option<usize> {
+    if app.session.path.as_deref() == Some(path) {
+        return Some(app.docs.active);
+    }
+    app.docs.slots.iter().position(|s| s.as_ref().is_some_and(|d| d.session.path.as_deref() == Some(path)))
+}
+
 /// Show `session` (a design built or read elsewhere): in place of a blank active design,
 /// otherwise in a new tab.
 pub fn adopt(app: &mut SolveApp, session: Session) {
@@ -832,6 +841,18 @@ mod tests {
         open_tab(&mut a, Session::default()).unwrap();
         assert_eq!(a.docs.count(), 4);
         a
+    }
+
+    /// The tab of a design is found by its file, whether it is the active tab or waits behind it.
+    #[test]
+    fn a_designs_tab_is_found_by_its_file() {
+        let mut a = four_tabs();
+        assert_eq!(find_path(&a, "/server/Plate.solidcraft"), None);
+        a.session.path = Some("/server/Plate.solidcraft".into());
+        assert_eq!(find_path(&a, "/server/Plate.solidcraft"), Some(3), "the active tab");
+        switch(&mut a, 1);
+        assert_eq!(find_path(&a, "/server/Plate.solidcraft"), Some(3), "a tab behind the active one");
+        assert_eq!(find_path(&a, "/server/Other.solidcraft"), None);
     }
 
     /// #3055: Close Other Tabs on the first tab closes the blank fourth, asks about the third

@@ -317,6 +317,11 @@ pub fn start(files: &Rc<Files>) {
 /// Store what commands wrote: OPFS paths into OPFS, download paths as downloads.
 pub fn flush(files: &Rc<Files>) {
     for (path, bytes) in vfs::take_writes() {
+        // SolidCraft_Cloud: designs on the file server are saved there.
+        if crate::server::parse(&path).is_some() {
+            crate::server::enqueue(files, &path, bytes);
+            continue;
+        }
         match disk::route(&path) {
             disk::WriteTo::Opfs => {
                 let name = path.strip_prefix(OPFS).unwrap_or(&path).to_string();
