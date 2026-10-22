@@ -29,14 +29,14 @@ Unser Code liegt in **`cloud/`**, damit er sich nicht mit Upstream-Dateien über
 |---|---|
 | `cloud/README.md` | Diese Übersicht |
 | `cloud/ARCHITECTURE.md` | Entwurf: Schnittstelle, Sperren, Updates |
-| `cloud/server/` | Der Datei-Server (Liste, Laden, Speichern, Sperren), ab Meilenstein M1 |
+| `cloud/server/` | Der Datei-Server (Liste, Laden, Speichern, Sperren), siehe dessen README |
 
 ## Stand
 
 | # | Meilenstein | Status |
 |---|---|---|
-| M0 | Fork, Projektgerüst, unverändertes Web-Image auf dem Pi | in Arbeit |
-| M1 | Datei-Server | offen |
+| M0 | Fork, Projektgerüst, unverändertes Web-Image auf dem Pi | Image baut in CI, Test auf dem Pi steht aus |
+| M1 | Datei-Server | fertig und getestet, Einsatz auf dem Pi steht aus |
 | M2 | Client-Anbindung (Öffnen/Speichern über den Server) | offen |
 | M3 | Sperren in der App | offen |
 | M4 | Startseite mit Server-Designs | offen |

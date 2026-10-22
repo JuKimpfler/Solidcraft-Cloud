@@ -1,0 +1,28 @@
+[package]
+name = "solidcraft-cloud-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Datei-Server für SolidCraft_Cloud: Designs speichern, laden und sperren"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Eigenständig, nicht Teil des SolidCraft-Workspaces: dessen Lint-Regeln und Upstream-Änderungen
+# am Workspace sollen den Server nicht stören.
+[workspace]
+
+[dependencies]
+tiny_http = "0.12"
+serde_json = "1"
+getrandom = "0.3"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
