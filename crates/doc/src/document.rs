@@ -685,8 +685,10 @@ pub enum FeatureKind {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         combine: bool,
         /// Where each of `bodies` is mirrored from: the occurrence path of the placement it was
-        /// picked at. The body is mirrored where that placement shows it, as the feature's own
-        /// component sees it. Empty in older designs, which mirror the bodies' own geometry.
+        /// picked at. The body is mirrored where that placement shows it, in the plane of the
+        /// feature's own component, and its copy joins the body's component (or, when that is
+        /// placed more than once, the innermost component around it placed once). Empty in older
+        /// designs, which mirror the bodies' own geometry.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         placements: Vec<Vec<u64>>,
     },
@@ -3225,10 +3227,11 @@ impl Document {
         if name.len() > 64 {
             return Some("parameter names are at most 64 characters".into());
         }
-        if expr::is_reserved(name) {
-            return Some(format!("`{name}` is a unit, constant or function name"));
+        match expr::reserved_kind(name) {
+            Some("constant") => Some(format!("`{name}` is a constant, so it cannot be a parameter name")),
+            Some(kind) => Some(format!("`{name}` is a {kind} name, so it cannot be a parameter name")),
+            None => None,
         }
-        None
     }
 
     /// Add or change a parameter. Fails if the result would not evaluate. A new parameter

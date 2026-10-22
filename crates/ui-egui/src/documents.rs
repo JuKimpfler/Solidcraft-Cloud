@@ -4,6 +4,7 @@
 //! Closing a design with unsaved changes asks first, and so does quitting: one "save changes?"
 //! per design with unsaved changes ([`request_quit`]).
 
+use crate::ui_kit::{Container, Surface};
 use egui::{FontId, Rect, Sense, pos2, vec2};
 use serde_json::{Value, json};
 use solidcraft_engine::Session;
@@ -529,8 +530,11 @@ pub fn tabs(app: &mut SolveApp, ui: &mut egui::Ui, r: Rect, x0: f32, x1: f32) {
             ui.ctx().data_mut(|d| d.insert_temp(id, !d.get_temp::<bool>(id).unwrap_or(false)));
         }
         if ui.ctx().data(|d| d.get_temp::<bool>(id).unwrap_or(false)) {
-            let resp =
-                crate::frame::area(id.with("area")).fixed_pos(pos2(mr.left(), r.bottom())).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+            let resp = Container::new(ui.ctx(), Surface::Popup)
+                .area(id.with("area"))
+                .fixed_pos(pos2(mr.left(), r.bottom()))
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
                     crate::context_menu::menu_frame(ui, |ui| {
                         for (i, (name, dirty)) in info.iter().enumerate() {
                             let label = format!("{name}{}", if *dirty { " •" } else { "" });
@@ -551,23 +555,24 @@ pub fn tabs(app: &mut SolveApp, ui: &mut egui::Ui, r: Rect, x0: f32, x1: f32) {
     let mut many: Option<Vec<usize>> = None;
     if let Some((i, at)) = menu.filter(|(i, _)| *i < n) {
         let items = [("ui.closeTab", "Close"), ("ui.closeOtherTabs", "Close Other Tabs"), ("ui.closeAllTabs", "Close All Tabs")];
-        let resp = crate::frame::area(menu_id.with("area")).fixed_pos(at).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
-            crate::context_menu::menu_frame(ui, |ui| {
-                let mut chosen = None;
-                for (id, label) in items {
-                    let mut item = crate::context_menu::Item::action(id, label, "");
-                    item.enabled = id != "ui.closeOtherTabs" || n > 1;
-                    let top = ui.cursor().top();
-                    let row = crate::context_menu::list_row(ui, &item);
-                    let rect = Rect::from_min_max(pos2(ui.min_rect().left(), top), pos2(ui.min_rect().right(), ui.cursor().top()));
-                    crate::scenario::publish_handle(&format!("tab_menu:{id}"), rect.center());
-                    if row.is_some() {
-                        chosen = Some(id);
+        let resp =
+            Container::new(ui.ctx(), Surface::Popup).area(menu_id.with("area")).fixed_pos(at).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+                crate::context_menu::menu_frame(ui, |ui| {
+                    let mut chosen = None;
+                    for (id, label) in items {
+                        let mut item = crate::context_menu::Item::action(id, label, "");
+                        item.enabled = id != "ui.closeOtherTabs" || n > 1;
+                        let top = ui.cursor().top();
+                        let row = crate::context_menu::list_row(ui, &item);
+                        let rect = Rect::from_min_max(pos2(ui.min_rect().left(), top), pos2(ui.min_rect().right(), ui.cursor().top()));
+                        crate::scenario::publish_handle(&format!("tab_menu:{id}"), rect.center());
+                        if row.is_some() {
+                            chosen = Some(id);
+                        }
                     }
-                }
-                chosen
-            })
-        });
+                    chosen
+                })
+            });
         match resp.inner {
             Some("ui.closeTab") => shut = Some(i),
             Some("ui.closeOtherTabs") => many = Some((0..n).filter(|k| *k != i).collect()),
