@@ -117,6 +117,28 @@ Namens-, URL- und ETag-Logik ist zusätzlich mit Unit-Tests abgedeckt (`cargo te
 - Der Server hält Sperren im Speicher; bei einem Neustart sind alle frei. Der nächste Heartbeat
   nimmt sie dann wieder.
 
+**Getestet** (Chromium unter Xvfb, Release-Web-Build gegen den Datei-Server hinter einem
+Test-Proxy mit Basic Auth, zwei Benutzer `alice` und `bob` in getrennten Browser-Kontexten):
+Öffnen von der Startseite nimmt die Sperre (`POST …/lock` → 200); bei `bob` steht in Liste und
+Karte „geöffnet von alice“; `bob` bekommt beim Öffnen eine Kopie („Halter (Kopie)“, Hinweis in der
+Statuszeile, Original auf dem Server byte-gleich per SHA-256 belegt); „Speichern“ der Kopie fragt
+nach einem Namen, und das Speichern unter neuem Namen nimmt sofort die Sperre
+(`PUT` 201 → `POST …/lock` 200); `alice` speichert ihr eigenes gesperrtes Design mit Token → 200,
+dieselbe Anfrage ohne Token → 423; 98 s ohne jede Eingabe hielten die Sperre über sechs
+Heartbeats (`PUT …/lock` alle 20 s), danach ging „Speichern“ durch; Schließen des Tabs und
+Verlassen der Seite gaben die Sperre in derselben Sekunde frei (`DELETE …/lock` 204), danach
+öffnete `bob` das Design normal statt als Kopie; „Sperre aufheben“ fragte erst nach und hob die
+fremde Sperre dann auf (`DELETE …/lock?force=1` 204) — hat der andere das Design noch offen, nimmt
+sein nächster Heartbeat sie wie vorgesehen wieder (`PUT` 409 → `POST` 200).
+
+**Offener Punkt:** Ein Tab, den der Browser abschießt (Absturz, Prozess-Kill), kommt nicht mehr zum
+`pagehide` und damit nicht zum `DELETE`; dann läuft die Sperre wie vorgesehen nach 60 s ab.
+
+**Kleine Unschönheit:** Speichert jemand die Kopie unter neuem Namen, heißt der Tab weiter
+„<Name> (Kopie)“. SolidCraft benennt ein Dokument beim „Speichern unter“ nur um, wenn sein Name
+noch dem alten Dateinamen entspricht; die Kopie hat keinen alten Dateinamen. Der Name lässt sich
+unter „Design properties“ ändern.
+
 ## Startseite (umgesetzt in M4)
 
 - Mit Datei-Server zeigt die Startseite **„Designs auf dem Server“** statt der eingebauten
@@ -132,6 +154,18 @@ Namens-, URL- und ETag-Logik ist zusätzlich mit Unit-Tests abgedeckt (`cargo te
   Sperre. Ein schon offenes Design wechselt nur den Tab.
 - Eingriff in Upstream: `Services::server_designs` liefert der Startseite die Liste; alle Texte
   kommen von der Hülle, `crates/ui-egui` bleibt sprachneutral.
+- egui zeichnet nur, wenn etwas passiert. Damit die zehn Sekunden überhaupt ablaufen, bittet die
+  Seite selbst um das nächste Bild (`request_repaint_after`), solange sie zu sehen ist; sonst
+  stünde die Liste still, bis sich die Maus bewegt.
+
+**Getestet** (gleicher Aufbau wie M3): Die Startseite zeigt „Designs auf dem Server“ statt der
+Beispiele, mit Vorschaubild, Besitzer bzw. Größe und Änderungszeit je Karte. Ein Design von 5,4 MB
+bekommt kein Bild — im Protokoll des Proxys steht kein `GET` dafür, nur für die vier kleinen. Die
+Liste holt sich ohne jede Eingabe alle rund zehn Sekunden neu (`GET /api/designs` im Protokoll),
+und die Karte eines Designs, das jemand öffnet oder freigibt, ändert sich von allein. Ein Klick
+auf eine Karte öffnet das Design und nimmt die Sperre; ein Eintrag unter „Zuletzt verwendet“ sagt
+„Auf dem Server“. Ohne Datei-Server (Seite ohne `/api/`) zeigt die Startseite wieder die
+eingebauten Beispiele, und Öffnen und Speichern laufen wie bei Upstream über den Browser.
 
 ## Updates
 
