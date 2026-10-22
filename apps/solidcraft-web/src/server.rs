@@ -649,6 +649,10 @@ mod web {
         if js_sys::Date::now() - cloud.listed_at.get() > LIST_FRESH_MS {
             refresh(cloud);
         }
+        // egui draws when something happens, and the start page just sits there: without asking
+        // for the next frame the list would stand still until the mouse moves, and a design
+        // somebody opened or saved would never show up by itself.
+        ask_again(cloud, LIST_FRESH_MS - (js_sys::Date::now() - cloud.listed_at.get()));
         want_preview(cloud);
         let entries = cloud.entries.borrow();
         let mut previews = cloud.previews.borrow_mut();
@@ -671,6 +675,14 @@ mod web {
             None => "Noch keine Designs auf dem Server. Mit „Speichern unter“ legst du eines an.".to_string(),
         };
         Some(ServerDesigns { title: "Designs auf dem Server".into(), empty, recent_label: "Auf dem Server".into(), prefix: PREFIX.into(), designs })
+    }
+
+    /// Draw the start page again in `ms` milliseconds, so it comes back for the list on its own.
+    /// At most one frame per [`LIST_FRESH_MS`], and never a busy loop while a fetch is running.
+    fn ask_again(cloud: &Rc<Cloud>, ms: f64) {
+        if let Some(ctx) = cloud.files.ctx.borrow().as_ref() {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(ms.clamp(1_000.0, LIST_FRESH_MS) / 1_000.0));
+        }
     }
 
     /// Read one design's picture for the start page: the picture sits inside the design, so each
