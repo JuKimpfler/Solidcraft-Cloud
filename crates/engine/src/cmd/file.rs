@@ -752,9 +752,7 @@ mod tests {
         let mut preview = saved_preview(&s).unwrap();
         // A checksum-valid but forged cached shape must not become editable geometry.
         for mesh in &mut preview.meshes {
-            for coordinate in &mut mesh.positions {
-                *coordinate *= 10.0;
-            }
+            mesh.positions = mesh.positions.iter().map(|c| c * 10.0).collect();
         }
         let bytes = solidcraft_io::write_design_container_with_preview(&s.doc, solidcraft_io::DesignCompression::Fast, Some(&preview)).unwrap();
         let path = std::env::temp_dir().join(format!("solidcraft-preview-{}.solidcraft", std::process::id()));

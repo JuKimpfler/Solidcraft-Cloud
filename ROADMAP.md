@@ -70,6 +70,11 @@ pointer movement orbits without a mouse button, and vertical scrolling zooms. Ot
 retain their saved two-finger scroll preference; camera motion is available through
 `view.navigate` and modifier-aware `ui.move` automation.
 
+UI redesign (#2016): the File/start view (#2027) uses shared light/dark navigation,
+action tiles, recent rows and sample cards, with recovery review and Save As/Export
+entry points. Document loading, sample caches and recovery safety retain their
+existing command paths.
+
 M11 precursor: File → Export Current View as DXF exports shown placed bodies and sketches from the current
 camera as a 2D millimetre drawing, with hidden edges omitted or dashed. Vector occlusion splits
 partly hidden edges and includes curved silhouettes. Repeated part meshes and triangle

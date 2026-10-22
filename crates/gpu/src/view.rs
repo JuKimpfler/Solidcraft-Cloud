@@ -37,6 +37,27 @@ pub struct PlannedBody {
     pub face_colors: Vec<[u8; 4]>,
 }
 
+/// A quick hasher for welding (the keys are coordinates' bits, from the design, not chosen to
+/// collide): the standard one made welding a 2 M-triangle scan take half a second.
+#[derive(Default)]
+struct WeldHasher(u64);
+
+impl std::hash::Hasher for WeldHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.write_u32(u32::from(*b));
+        }
+    }
+
+    fn write_u32(&mut self, x: u32) {
+        self.0 = (self.0.rotate_left(5) ^ u64::from(x)).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
 /// A vertex of [`SharedTris`]: position and normal (3 × f32 each).
 pub const SHARED_SIZE: usize = 24;
 
@@ -69,10 +90,11 @@ impl SharedTris {
         });
         let mut out = SharedTris { flat, ..Default::default() };
         out.indices.reserve_exact(mesh.triangles.len() * 3);
-        let mut seen: std::collections::HashMap<[u32; 6], u32> = std::collections::HashMap::with_capacity(mesh.positions.len());
+        let mut seen: std::collections::HashMap<[u32; 6], u32, std::hash::BuildHasherDefault<WeldHasher>> =
+            std::collections::HashMap::with_capacity_and_hasher(mesh.positions.len() / 2, Default::default());
         for t in &mesh.triangles {
-            let Some(corners) = t.iter().map(|i| corner(*i)).collect::<Option<Vec<_>>>() else { continue };
-            for (p, n) in corners {
+            let [Some(a), Some(b), Some(c)] = t.map(corner) else { continue };
+            for (p, n) in [a, b, c] {
                 let [x, y, z] = bits(p);
                 let [a, b, c] = if flat { [0; 3] } else { bits(n) };
                 let next = u32::try_from(out.vertices.len() / SHARED_SIZE).unwrap_or(u32::MAX);
