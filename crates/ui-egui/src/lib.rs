@@ -92,6 +92,7 @@ mod material_card_review;
 mod measurement_ui_tests;
 #[cfg(test)]
 mod menu_tests;
+pub(crate) mod mesh_lod;
 pub mod messages;
 #[cfg(test)]
 mod pattern_arrow_tests;

@@ -1253,6 +1253,11 @@ fn redefine(s: &mut Session, p: &Value) -> Result<Value> {
     if std::mem::discriminant(&new.kind) != std::mem::discriminant(&old.kind) && !(boundary(&new.kind) && boundary(&old.kind)) {
         return Err(bad(cmd, format!("{} is not a {} feature", old.name, cid)));
     }
+    // The trial still holds the old feature, so a plane offset from its own name was made there,
+    // and once swapped in it would be built on itself (#3567).
+    if new.kind.names_feature(&old.name) {
+        return Err(bad(cmd, format!("{} can't be built on itself: pick another plane or face", old.name)));
+    }
     // Optional inputs can move other inputs' positions (e.g. Distance 2 goes before Taper).
     // Keep each existing model parameter attached to its semantic input, rather than its
     // old index. Constructor-assigned names for new inputs cannot reuse the old dimensions.

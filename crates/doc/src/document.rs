@@ -368,6 +368,8 @@ pub enum AxisRef {
     World { axis: String },
     /// Any line in the sketch plane, in world coordinates.
     Line { origin: Position, dir: Dir },
+    /// A construction axis feature, by name, where it is when the revolve is evaluated.
+    Construction { name: FeatureName },
 }
 
 /// Persistent cylindrical Emboss selection, authored in the feature component frame.
@@ -2028,6 +2030,10 @@ pub enum PatternKind {
         alignment: solidcraft_sketch::PatternAlignment,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         reversed: bool,
+        /// A construction axis the copies turn about, by name, followed when it moves;
+        /// `origin` and `axis` are where it was when the pattern was made.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        axis_feature: Option<FeatureName>,
     },
     /// Copies along a chain of sketch curves: instance k moves by path(k·spacing) − path(0),
     /// measured along the path from its start.

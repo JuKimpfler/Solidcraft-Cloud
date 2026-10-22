@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use egui_wgpu::wgpu;
 pub use solidcraft_gpu::view::{
-    AccessMap, BlockBytes, Frame, GpuImage, GpuScene, GpuTarget, InstancedMesh, LINE_SIZE, PBR_SIZE, PlannedBody, Renderer, SHARED_SIZE, SceneBlock,
-    SceneSlot, SharedTris, TRI_SIZE, supersampled_size,
+    AccessMap, BlockBytes, Frame, GpuImage, GpuScene, GpuTarget, INSTANCE_SIZE, InstanceLook, InstancedMesh, LINE_SIZE, LOD_PX, PBR_SIZE,
+    PlannedBody, Renderer, SHARED_SIZE, SceneBlock, SceneSlot, SharedTris, TRI_SIZE, level_for, placement_scale, supersampled_size,
 };
 
 /// A frame of the viewport as an egui paint callback.

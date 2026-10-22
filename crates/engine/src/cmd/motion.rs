@@ -19,7 +19,7 @@ mod analysis;
 #[path = "motion_animation.rs"]
 mod animation;
 #[path = "contact_sweep.rs"]
-mod contact_sweep;
+pub(crate) mod contact_sweep;
 #[path = "motion_sweep.rs"]
 mod sweep;
 
