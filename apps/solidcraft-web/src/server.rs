@@ -126,7 +126,8 @@ mod web {
     use js_sys::{Function, Promise, Uint8Array};
     use serde_json::Value;
     use solidcraft_engine::io::vfs;
-    use solidcraft_ui_egui::{SolveApp, documents};
+    use solidcraft_ui_egui::theme::Tokens;
+    use solidcraft_ui_egui::{SolveApp, documents, ui_kit};
     use wasm_bindgen::{JsCast as _, JsValue};
     use wasm_bindgen_futures::{JsFuture, spawn_local};
 
@@ -508,78 +509,70 @@ mod web {
             return;
         }
         let picking = cloud.picking.borrow().is_some();
-        let mut open = true;
         let mut act: Option<(&'static str, String)> = None;
-        egui::Window::new(if picking { "Design öffnen (Server)" } else { "Designs auf dem Server" })
-            .id(egui::Id::new("solidcraft_cloud_designs"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_size([640.0, 360.0])
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("Aktualisieren").clicked() {
-                        act = Some(("refresh", String::new()));
-                    }
-                    if ui
-                        .button("Vom Computer öffnen…")
-                        .on_hover_text("Eine Datei von diesem Computer öffnen. Mit „Speichern unter“ kommt sie auf den Server.")
-                        .clicked()
-                    {
-                        act = Some(("computer", String::new()));
-                    }
-                    if ui.button("Dateien in diesem Browser…").clicked() {
-                        act = Some(("browser", String::new()));
-                    }
-                });
-                ui.separator();
-                if let Some(e) = cloud.list_error.borrow().as_ref() {
-                    ui.colored_label(ui.visuals().error_fg_color, e);
+        let error = Tokens::get().error;
+        let title = if picking { "Design öffnen (Server)" } else { "Designs auf dem Server" };
+        let closed = ui_kit::Window::new(egui::Id::new("solidcraft_cloud_designs"), "open", title).cards(3.5).show_body(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui_kit::button(ui, "Aktualisieren", ui_kit::Button::Normal).clicked() {
+                    act = Some(("refresh", String::new()));
                 }
-                if let Some(name) = cloud.loading.borrow().as_ref() {
+                if ui_kit::button(ui, "Vom Computer öffnen…", ui_kit::Button::Normal)
+                    .on_hover_text("Eine Datei von diesem Computer öffnen. Mit „Speichern unter“ kommt sie auf den Server.")
+                    .clicked()
+                {
+                    act = Some(("computer", String::new()));
+                }
+                if ui_kit::button(ui, "Dateien in diesem Browser…", ui_kit::Button::Normal).clicked() {
+                    act = Some(("browser", String::new()));
+                }
+            });
+            ui.separator();
+            if let Some(e) = cloud.list_error.borrow().as_ref() {
+                ui.colored_label(error, e);
+            }
+            if let Some(name) = cloud.loading.borrow().as_ref() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(format!("Lade „{name}“ …"));
+                });
+            }
+            let entries = cloud.entries.borrow().clone();
+            if entries.is_empty() {
+                if cloud.listing.get() {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(format!("Lade „{name}“ …"));
+                        ui.label("Lese die Liste vom Server …");
                     });
+                } else if cloud.list_error.borrow().is_none() {
+                    ui.label("Noch keine Designs auf dem Server. Mit „Speichern unter“ legst du eines an.");
                 }
-                let entries = cloud.entries.borrow().clone();
-                if entries.is_empty() {
-                    if cloud.listing.get() {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label("Lese die Liste vom Server …");
-                        });
-                    } else if cloud.list_error.borrow().is_none() {
-                        ui.label("Noch keine Designs auf dem Server. Mit „Speichern unter“ legst du eines an.");
-                    }
-                }
-                let busy = cloud.loading.borrow().is_some();
-                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-                    egui::Grid::new("cloud_designs").num_columns(5).striped(true).spacing([12.0, 6.0]).show(ui, |ui| {
-                        for e in &entries {
-                            ui.horizontal(|ui| {
-                                if ui.add_enabled(!busy, egui::Button::new("Öffnen").small()).clicked() {
-                                    act = Some(("open", e.name.clone()));
-                                }
-                                if ui.add_enabled(!busy, egui::Button::new("Herunterladen").small()).clicked() {
-                                    act = Some(("download", e.name.clone()));
-                                }
-                            });
-                            ui.label(&e.name);
-                            ui.label(size_text(e.size));
-                            ui.label(local_time(e.modified_ms));
-                            match &e.lock_owner {
-                                Some(owner) => ui.weak(format!("geöffnet von {owner}")),
-                                None => ui.label(""),
-                            };
-                            ui.end_row();
+            }
+            let ready = cloud.loading.borrow().is_none();
+            // The window's text is cut to fit; the list's names, dates and buttons are shown whole.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            egui::Grid::new("cloud_designs").num_columns(5).striped(true).spacing([12.0, 6.0]).show(ui, |ui| {
+                for e in &entries {
+                    ui.horizontal(|ui| {
+                        if ui_kit::button(ui, "Öffnen", ui_kit::Button::Enabled(ready)).clicked() {
+                            act = Some(("open", e.name.clone()));
+                        }
+                        if ui_kit::button(ui, "Herunterladen", ui_kit::Button::Enabled(ready)).clicked() {
+                            act = Some(("download", e.name.clone()));
                         }
                     });
-                });
+                    ui.label(&e.name);
+                    ui.label(size_text(e.size));
+                    ui.label(local_time(e.modified_ms));
+                    match &e.lock_owner {
+                        Some(owner) => ui.weak(format!("geöffnet von {owner}")),
+                        None => ui.label(""),
+                    };
+                    ui.end_row();
+                }
             });
-        if !open {
+        });
+        if closed {
             close_panel(cloud);
             return;
         }
@@ -660,46 +653,41 @@ mod web {
         let mut slot = cloud.save_ask.borrow_mut();
         let Some(ask) = slot.as_mut() else { return };
         let mut answer: Option<Option<String>> = None;
-        let mut open = true;
-        egui::Window::new("Auf dem Server speichern")
-            .id(egui::Id::new("solidcraft_cloud_save"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label("Name des Designs:");
-                let r = ui.add(egui::TextEdit::singleline(&mut ask.name).desired_width(360.0));
-                if std::mem::take(&mut ask.focus) {
-                    r.request_focus();
+        let error = Tokens::get().error;
+        let closed = ui_kit::Window::new(egui::Id::new("solidcraft_cloud_save"), "save", "Auf dem Server speichern").show_body(ctx, |ui| {
+            ui.label("Name des Designs:");
+            let r = ui_kit::cell_editor(ui, egui::Id::new("solidcraft_cloud_save_name"), &mut ask.name, "", ask.error.is_some());
+            if std::mem::take(&mut ask.focus) {
+                r.request_focus();
+            }
+            ui.weak("Ohne Endung wird .solidcraft ergänzt.");
+            ui.weak("Alle im Team sehen das Design.");
+            if let Some(e) = &ask.error {
+                ui.colored_label(error, e);
+            }
+            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.horizontal(|ui| {
+                if ui_kit::button(ui, "Speichern", ui_kit::Button::Normal).clicked() || enter {
+                    let name = with_extension(&ask.name);
+                    let entries = cloud.entries.borrow();
+                    answer = match valid_name(&name) {
+                        Err(e) => {
+                            ask.error = Some(e);
+                            None
+                        }
+                        Ok(()) if taken(entries.iter().map(|e| e.name.as_str()), &name) => {
+                            ask.error = Some(format!("„{name}“ gibt es auf dem Server schon. Bitte einen anderen Namen wählen."));
+                            None
+                        }
+                        Ok(()) => Some(Some(path(&name))),
+                    };
                 }
-                ui.weak("Ohne Endung wird .solidcraft ergänzt. Alle im Team sehen das Design.");
-                if let Some(e) = &ask.error {
-                    ui.colored_label(ui.visuals().error_fg_color, e);
+                if ui_kit::button(ui, "Abbrechen", ui_kit::Button::Normal).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    answer = Some(None);
                 }
-                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                ui.horizontal(|ui| {
-                    if ui.button("Speichern").clicked() || enter {
-                        let name = with_extension(&ask.name);
-                        let entries = cloud.entries.borrow();
-                        answer = match valid_name(&name) {
-                            Err(e) => {
-                                ask.error = Some(e);
-                                None
-                            }
-                            Ok(()) if taken(entries.iter().map(|e| e.name.as_str()), &name) => {
-                                ask.error = Some(format!("„{name}“ gibt es auf dem Server schon. Bitte einen anderen Namen wählen."));
-                                None
-                            }
-                            Ok(()) => Some(Some(path(&name))),
-                        };
-                    }
-                    if ui.button("Abbrechen").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        answer = Some(None);
-                    }
-                });
             });
-        if !open {
+        });
+        if closed {
             answer = Some(None);
         }
         if let Some(chosen) = answer
