@@ -1389,11 +1389,7 @@ mod tests {
                 empty: "Noch keine Designs auf dem Server.".into(),
                 recent_label: "Auf dem Server".into(),
                 prefix: "/server/".into(),
-                designs: vec![crate::ServerDesign {
-                    path: "/server/Halter.solidcraft".into(),
-                    detail: "geöffnet von alice".into(),
-                    picture: None,
-                }],
+                designs: vec![crate::ServerDesign { path: "/server/Halter.solidcraft".into(), detail: "geöffnet von alice".into(), picture: None }],
             })
         }));
         h.app.home.add_recent("/server/Halter.solidcraft");

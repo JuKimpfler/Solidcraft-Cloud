@@ -266,6 +266,9 @@ fn services(cc: &eframe::CreationContext<'_>) -> Services {
         restore_file: None,
         download_design: None,
         browser_files: None,
+        // SolidCraft_Cloud: only the browser build reaches the team's file server, so this app
+        // keeps the built-in samples on its start page.
+        server_designs: None,
         agent_http: Some(std::sync::Arc::new(agent_http)),
         secrets: Some(std::sync::Arc::new(Keychain)),
         show_in_folder: Some(Box::new(|path| {

@@ -25,7 +25,7 @@ const EXTENSIONS: [&str; 3] = ["solidcraft", "solvecraft", "json"];
 /// The longest name the server takes.
 const MAX_NAME_BYTES: usize = 200;
 /// How often the locks this page holds are renewed. The server lets one run out after 60 s
-/// (`SOLIDCRAFT_LOCK_TTL`), so a missed beat still leaves two more.
+/// (`SOLIDCRAFT_CLOUD_LOCK_TTL_SECS`), so a missed beat still leaves two more.
 const HEARTBEAT_MS: i32 = 20_000;
 /// How long the start page's list may be before it is fetched again.
 const LIST_FRESH_MS: f64 = 10_000.0;
@@ -112,11 +112,8 @@ pub fn lock_text(owner: &str, mine: bool, here: bool) -> String {
 /// What to tell the user who opened a design somebody has: this is a copy, and saving it asks for
 /// a new name (the design on the server stays as it is).
 pub fn copy_notice(name: &str, owner: &str, mine: bool) -> String {
-    let who = if mine {
-        format!("„{name}“ hast du in einem anderen Fenster geöffnet")
-    } else {
-        format!("„{name}“ ist von {owner} geöffnet")
-    };
+    let who =
+        if mine { format!("„{name}“ hast du in einem anderen Fenster geöffnet") } else { format!("„{name}“ ist von {owner} geöffnet") };
     format!("{who}. Hier ist nur eine Kopie: Mit „Speichern unter“ sicherst du sie unter einem neuen Namen.")
 }
 
@@ -687,9 +684,7 @@ mod web {
             let previews = cloud.previews.borrow();
             entries
                 .iter()
-                .find(|e| {
-                    !e.etag.is_empty() && e.size > 0 && e.size <= PREVIEW_MAX_BYTES && !previews.get(&e.name).is_some_and(|p| p.etag == e.etag)
-                })
+                .find(|e| !e.etag.is_empty() && e.size > 0 && e.size <= PREVIEW_MAX_BYTES && !previews.get(&e.name).is_some_and(|p| p.etag == e.etag))
                 .map(|e| (e.name.clone(), e.etag.clone()))
         };
         let Some((name, etag)) = next else { return };
