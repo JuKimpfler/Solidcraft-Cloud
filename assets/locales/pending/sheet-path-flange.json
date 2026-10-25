@@ -1,0 +1,38 @@
+{
+  "en": {
+    "Add bend": "Add bend",
+    "Another bend on the far edge of the last flange": "Another bend on the far edge of the last flange",
+    "Flanges": "Flanges",
+    "Further Bends": "Further Bends",
+    "Other way": "Other way",
+    "Remove this bend": "Remove this bend",
+    "Same way": "Same way",
+    "cmd.sheet_path_flange": "Path Flange",
+    "pick the path": "pick the path",
+    "set by the sketch's lines": "set by the sketch's lines"
+  },
+  "ja": {
+    "Add bend": "曲げを追加",
+    "Another bend on the far edge of the last flange": "最後のフランジの先端にさらに曲げを追加",
+    "Flanges": "フランジ",
+    "Further Bends": "追加の曲げ",
+    "Other way": "反対方向",
+    "Remove this bend": "この曲げを削除",
+    "Same way": "同じ方向",
+    "cmd.sheet_path_flange": "パスフランジ",
+    "pick the path": "パスを選択",
+    "set by the sketch's lines": "スケッチの線で決まります"
+  },
+  "zh": {
+    "Add bend": "添加折弯",
+    "Another bend on the far edge of the last flange": "在最后一个法兰的远端边上再加一道折弯",
+    "Flanges": "法兰",
+    "Further Bends": "更多折弯",
+    "Other way": "反方向",
+    "Remove this bend": "移除此折弯",
+    "Same way": "同方向",
+    "cmd.sheet_path_flange": "路径法兰",
+    "pick the path": "选择路径",
+    "set by the sketch's lines": "由草图的线条决定"
+  }
+}
