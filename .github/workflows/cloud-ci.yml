@@ -1,0 +1,50 @@
+# SolidCraft_Cloud: die Prüfung für unseren Teil. Der Upstream-Workflow ci.yml braucht eigene
+# Blacksmith-Runner, die es im Fork nicht gibt; er ist deshalb nur noch von Hand startbar.
+#
+# Hier: baut die Desktop-App, die Web-Hülle (WebAssembly) und prüft unseren Code (Tests, Schichten,
+# UI-Container). Den Datei-Server prüft cloud-server.yml.
+name: Cloud CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libxkbcommon-dev libwayland-dev \
+            libx11-dev libxrandr-dev libxi-dev libxcursor-dev libgl1-mesa-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cloud-ci
+      - name: Desktop app
+        run: cargo check --locked -p solidcraft
+      - name: Web app (WebAssembly)
+        run: cargo check --locked -p solidcraft-web --target wasm32-unknown-unknown
+      - name: Tests of the desktop client
+        run: cargo test --locked -p solidcraft cloud
+      - name: Dependency layers
+        run: cargo xtask layers
+      - name: UI containers
+        run: cargo xtask ui-containers

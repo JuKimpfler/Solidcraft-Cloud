@@ -4,6 +4,7 @@
 # files, then commit them in a pull request if the change is intended.
 name: FreeCAD reference values
 
+# SolidCraft_Cloud: nur noch von Hand startbar (Upstream-Workflow, im Fork nicht gebraucht).
 on:
   workflow_dispatch:
     inputs:

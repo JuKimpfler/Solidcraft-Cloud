@@ -40,18 +40,8 @@
 # same.
 name: CI
 
+# SolidCraft_Cloud: nur noch von Hand startbar (Upstream-Workflow, im Fork nicht gebraucht).
 on:
-  # Draft pull requests run no CI (see `changes`, `checks` and `ci`): it starts when the PR is
-  # marked ready for review, and on every push after that. `labeled` is there for approved-for-ci
-  # only (other labels are skipped, see the top of this file).
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, labeled]
-  # The merge queue: each queued group runs the full suite before it lands on main.
-  merge_group:
-  push:
-    branches: [main]
-  schedule:
-    - cron: "17 6 * * *"
   workflow_dispatch:
     inputs:
       cross_compile:

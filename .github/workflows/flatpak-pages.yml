@@ -1,8 +1,7 @@
 name: Publish Flatpak repository to Pages
 
+# SolidCraft_Cloud: nur noch von Hand startbar (Upstream-Workflow, im Fork nicht gebraucht).
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       release_tag:

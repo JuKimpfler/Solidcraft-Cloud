@@ -3,15 +3,9 @@
 # paused"). The logic is in scripts/kernel-paused/ (tested in ci.yml).
 name: Kernel paused
 
+# SolidCraft_Cloud: nur noch von Hand startbar (Upstream-Workflow, im Fork nicht gebraucht).
 on:
-  issues:
-    types: [opened]
-  # pull_request_target so PRs from forks can be labelled. It runs the base branch's
-  # scripts/kernel-paused and only lists the PR's changed paths; the PR's code is never checked out.
-  pull_request_target:
-    types: [opened]
-  discussion:
-    types: [created]
+  workflow_dispatch:
 
 permissions:
   contents: read # to check out scripts/kernel-paused

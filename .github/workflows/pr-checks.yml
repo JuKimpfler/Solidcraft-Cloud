@@ -3,11 +3,9 @@
 # Neither is a required status check. The logic is in scripts/pr-checks/pr-checks.js (tested in ci.yml).
 name: PR checks
 
+# SolidCraft_Cloud: nur noch von Hand startbar (Upstream-Workflow, im Fork nicht gebraucht).
 on:
-  # pull_request, never pull_request_target: nothing here checks out or runs the PR's code, and the
-  # token is read-only for fork PRs. Only scripts/pr-checks from the PR's own merge commit is run.
-  pull_request:
-    types: [opened, edited, synchronize, reopened, ready_for_review, labeled, unlabeled]
+  workflow_dispatch:
 
 permissions:
   contents: read

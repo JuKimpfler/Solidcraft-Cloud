@@ -19,12 +19,8 @@
 # A dry run: dispatch with draft=false (the default). Only the release branch may create drafts.
 name: Release
 
+# SolidCraft_Cloud: nur noch von Hand startbar (Upstream-Workflow, im Fork nicht gebraucht).
 on:
-  schedule:
-    - cron: '0 0 * * *'
-      timezone: America/New_York
-  push:
-    branches: [release]
   workflow_dispatch:
     inputs:
       draft:

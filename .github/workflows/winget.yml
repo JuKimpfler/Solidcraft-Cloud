@@ -6,9 +6,8 @@
 # winget-pkgs yet; see docs/releasing.md.
 name: WinGet
 
+# SolidCraft_Cloud: nur noch von Hand startbar (Upstream-Workflow, im Fork nicht gebraucht).
 on:
-  release:
-    types: [released]
   workflow_dispatch:
     inputs:
       tag:

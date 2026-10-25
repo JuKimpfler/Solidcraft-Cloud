@@ -3,12 +3,8 @@
 # Adapted from PhotoCraft's (storytold/photocraft, Apache-2.0; see ATTRIBUTION.md).
 name: Packaging lint
 
+# SolidCraft_Cloud: nur noch von Hand startbar (Upstream-Workflow, im Fork nicht gebraucht).
 on:
-  push:
-    branches: [main]
-    paths: [".github/workflows/**", "packaging/**", "assets/**"]
-  pull_request:
-    paths: [".github/workflows/**", "packaging/**", "assets/platforms/**"]
   workflow_dispatch:
 
 permissions:
