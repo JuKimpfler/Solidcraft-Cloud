@@ -4296,6 +4296,7 @@ dependencies = [
  "solidcraft-render",
  "solidcraft-sketch",
  "thiserror 2.0.21",
+ "toml_edit",
  "web-time",
 ]
 
@@ -4699,6 +4700,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 

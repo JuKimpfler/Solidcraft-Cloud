@@ -154,6 +154,8 @@ impl eframe::App for App {
         if let Some(menu) = &mut self.native_menu {
             menu.raw_input_hook(&mut self.solve, ctx, raw);
         }
+        #[cfg(target_os = "macos")]
+        macos_fullscreen_content(ctx, raw);
         // Before the app's own hook, which adds the control channel's events.
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         self.space_mouse.raw_input_hook(self.solve.preferences.space_mouse_enabled, raw);
@@ -163,7 +165,7 @@ impl eframe::App for App {
         self.solve.raw_input_hook(raw);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.solve.ui(ui);
+        content_ui(&mut self.solve, ui);
         self.cloud.ui(&mut self.solve, ui.ctx());
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -246,6 +248,37 @@ fn case_variants(exts: &[&str]) -> Vec<String> {
         }
     }
     all
+}
+
+/// egui's root Ui spans the whole viewport, including native safe areas. Lay out the app
+/// inside the unobscured rectangle so its application bar can receive native pointer input.
+fn content_ui(app: &mut SolveApp, ui: &mut egui::Ui) {
+    let content = ui.ctx().content_rect();
+    let above = egui::Rect::from_min_max(ui.max_rect().min, egui::pos2(ui.max_rect().right(), content.top()));
+    ui.painter().rect_filled(above, 0.0, solidcraft_ui_egui::theme::Tokens::get().app_bar);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| app.ui(ui));
+}
+
+/// A transparent macOS title bar still intercepts clicks at the top in fullscreen (#3643).
+/// `contentLayoutRect` reports the whole content view once that bar auto-hides, so reserve
+/// the native titled-window height even then. AppKit supplies the height in logical points;
+/// egui's UI zoom is separate from the display's Retina scale.
+#[cfg(target_os = "macos")]
+fn macos_fullscreen_content(ctx: &egui::Context, raw: &mut egui::RawInput) {
+    let Some(mtm) = objc2::MainThreadMarker::new() else { return };
+    let frame = objc2_app_kit::NSWindow::frameRectForContentRect_styleMask(Default::default(), objc2_app_kit::NSWindowStyleMask::Titled, mtm);
+    fullscreen_content_insets(raw, frame.size.height as f32, ctx.zoom_factor());
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn fullscreen_content_insets(raw: &mut egui::RawInput, title_height: f32, zoom: f32) {
+    let fullscreen = raw.viewports.get(&raw.viewport_id).and_then(|v| v.fullscreen).unwrap_or(false);
+    let mut insets = raw.safe_area_insets.unwrap_or_default();
+    if fullscreen && title_height.is_finite() && title_height > 0.0 && zoom.is_finite() && zoom > 0.0 {
+        insets.0.top = insets.0.top.max(title_height / zoom);
+    }
+    // Explicitly reset on leaving fullscreen: None would retain the preceding frame's inset.
+    raw.safe_area_insets = Some(insets);
 }
 
 fn services(cc: &eframe::CreationContext<'_>) -> (Services, std::rc::Rc<cloud::Cloud>) {
@@ -1044,7 +1077,7 @@ mod backend_tests {
 }
 
 #[cfg(test)]
-mod icon_tests {
+mod viewport_tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_preserves_the_bundle_icon_instead_of_setting_a_runtime_bitmap() {
@@ -1061,6 +1094,83 @@ mod icon_tests {
         assert_eq!((icon.width, icon.height), (64, 64));
         assert_eq!(icon.rgba, super::app_icon::rgba(64).expect("original mark"));
         assert_eq!(viewport.app_id.as_deref(), Some(super::APP_ID));
+    }
+
+    #[test]
+    fn fullscreen_bar_clears_native_chrome_and_undo_redo_keep_working() {
+        use egui::{Event, PointerButton, Pos2, RawInput, Rect, ViewportId, vec2};
+        use serde_json::json;
+        use solidcraft_ui_egui::scenario::handle_at;
+
+        // AppKit points are independent of Retina scale and of the user's UI zoom.
+        for (zoom, retina) in [(1.0, 1.0), (1.0, 2.0), (1.5, 2.0), (2.0, 2.0)] {
+            let ctx = egui::Context::default();
+            solidcraft_ui_egui::fonts::setup_bundled_fonts(&ctx);
+            ctx.set_zoom_factor(zoom);
+            let mut app = super::SolveApp::new(super::Session::default(), Default::default());
+            app.integrated_titlebar = true;
+            for (command, params) in [
+                ("sketch.create", json!({"plane":"XY"})),
+                ("sketch.rectangle.two_point", json!({"p0":[0,0],"p1":[40,30]})),
+                ("sketch.finish", json!({})),
+                ("solid.extrude", json!({"distance":15})),
+            ] {
+                app.run(command, params).unwrap();
+            }
+            let mut time = 0.0;
+            let mut frame = |app: &mut super::SolveApp, fullscreen, events| {
+                time += 0.05;
+                let mut raw = RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0))),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                };
+                let viewport = raw.viewports.get_mut(&ViewportId::ROOT).unwrap();
+                viewport.fullscreen = Some(fullscreen);
+                viewport.native_pixels_per_point = Some(retina);
+                super::fullscreen_content_insets(&mut raw, 32.0, zoom);
+                let _ = ctx.run_ui(raw, |ui| super::content_ui(app, ui));
+            };
+            // Enter, leave, and enter again: no stale inset when returning to a normal window.
+            for fullscreen in [false, true, false, true] {
+                frame(&mut app, fullscreen, vec![]);
+                frame(&mut app, fullscreen, vec![]);
+                let top = if fullscreen { 32.0 / zoom } else { 0.0 };
+                for name in ["appbar:file", "appbar:undo", "appbar:redo", "appbar:help"] {
+                    let at = handle_at(name).unwrap();
+                    assert!((at.y - top - 17.0).abs() < 0.1, "{name}: {at:?}, fullscreen={fullscreen}, zoom={zoom}");
+                }
+                for (handle, bodies) in [("appbar:undo", 0), ("appbar:redo", 1)] {
+                    let at = handle_at(handle).unwrap();
+                    frame(&mut app, fullscreen, vec![Event::PointerMoved(at)]);
+                    for pressed in [true, false] {
+                        frame(
+                            &mut app,
+                            fullscreen,
+                            vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() }],
+                        );
+                    }
+                    assert_eq!(app.session.model.state().bodies.len(), bodies, "{handle}, fullscreen={fullscreen}, zoom={zoom}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fullscreen_inset_preserves_existing_safe_areas_and_resets_on_exit() {
+        use egui::epaint::MarginF32;
+        use egui::{RawInput, SafeAreaInsets, ViewportId};
+        let mut raw = RawInput::default();
+        raw.viewports.get_mut(&ViewportId::ROOT).unwrap().fullscreen = Some(true);
+        raw.safe_area_insets = Some(SafeAreaInsets(MarginF32 { top: 40.0, left: 5.0, right: 6.0, bottom: 7.0 }));
+        super::fullscreen_content_insets(&mut raw, 32.0, 2.0);
+        assert_eq!(raw.safe_area_insets.unwrap().0, MarginF32 { top: 40.0, left: 5.0, right: 6.0, bottom: 7.0 });
+
+        raw.viewports.get_mut(&ViewportId::ROOT).unwrap().fullscreen = Some(false);
+        raw.safe_area_insets = None;
+        super::fullscreen_content_insets(&mut raw, 32.0, 1.0);
+        assert_eq!(raw.safe_area_insets, Some(SafeAreaInsets::default()));
     }
 }
 

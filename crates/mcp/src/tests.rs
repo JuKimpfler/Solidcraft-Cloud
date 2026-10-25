@@ -2178,3 +2178,53 @@ fn describe_command_and_strict_parameter_checking() {
     let m = tool(&mut s, "measure", json!({}));
     assert_eq!(m["body_count"], json!(0), "{m}");
 }
+
+/// Plain `mcp` with no app running: the session is headless, says so on every result, and bridges
+/// to the app once one runs, but only while it holds no work of its own.
+#[test]
+fn auto_session_bridges_to_a_late_app_only_while_empty() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    // A port nothing listens on: the bridge exists, its calls say the app is not running.
+    let port = Rc::new(Cell::new(None::<u16>));
+    let seen = port.clone();
+    let mut s = Server::new(Box::new(crate::Auto::new(Headless::default(), Box::new(move || seen.get()), None)));
+    let text = |r: &Value| r["result"]["content"].as_array().unwrap().iter().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n");
+
+    let r = raw_tool(&mut s, "list_commands", json!({}));
+    assert!(text(&r).contains("headless session because the SolidCraft app was not found"), "{r}");
+    let init = call(&mut s, 1, "initialize", json!({}));
+    assert!(init["result"]["instructions"].as_str().unwrap().contains("was not running when this server started"));
+
+    // The app appears while the session is empty: the next call goes to it.
+    port.set(Some(1));
+    let r = raw_tool(&mut s, "inspect_design", json!({}));
+    assert!(!text(&r).contains("headless session because"), "{r}");
+    assert!(s.backend().has_ui());
+    assert!(s.backend().describe().contains("connected to the SolidCraft app"));
+
+    // With work in the headless session, the app showing up changes nothing.
+    port.set(None);
+    let mut s = Server::new(Box::new(crate::Auto::new(
+        Headless::default(),
+        Box::new({
+            let p = port.clone();
+            move || p.get()
+        }),
+        None,
+    )));
+    let r = raw_tool(&mut s, "execute", json!({"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10}}));
+    assert_ne!(r["result"]["isError"], json!(true), "{r}");
+    port.set(Some(1));
+    let r = raw_tool(&mut s, "inspect_design", json!({}));
+    assert!(text(&r).contains("headless session because the SolidCraft app was not found"), "{r}");
+    assert!(!s.backend().has_ui());
+}
+
+/// A server with no `Auto` backend (`--headless`, `--in`) adds no notice.
+#[test]
+fn plain_headless_adds_no_notice() {
+    let mut s = server();
+    let r = raw_tool(&mut s, "list_commands", json!({}));
+    assert_eq!(r["result"]["content"].as_array().unwrap().len(), 1);
+}

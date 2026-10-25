@@ -753,7 +753,7 @@ fn solidcraft_tool(title: &str) -> bool {
 
 /// `solidcraft-cli` next to this program, else on the search path.
 #[cfg(not(target_arch = "wasm32"))]
-fn find_cli() -> Option<std::path::PathBuf> {
+pub(crate) fn find_cli() -> Option<std::path::PathBuf> {
     let name = if cfg!(windows) { "solidcraft-cli.exe" } else { "solidcraft-cli" };
     if let Some(p) = solidcraft_engine::geom::env::var("CLI").map(std::path::PathBuf::from).filter(|p| p.is_file()) {
         return Some(p);
