@@ -67,6 +67,22 @@ Desktop-App (`apps/solidcraft`) kann deshalb dasselbe: Unser Code liegt in
 - Grenze: Ein Design aus der Liste „Zuletzt geöffnet" öffnet die Zwischenspeicher-Datei direkt, ohne
   Sperre und ohne Aktualisierung. Der ETag schützt das Hochladen trotzdem.
 
+## Workflows (GitHub Actions)
+
+Im Fork laufen nur unsere eigenen Workflows von selbst. Die Upstream-Workflows (CI auf
+Blacksmith-Runnern, Release für alle Plattformen, Bots, Pakete) sind nur noch von Hand startbar:
+Ihre Auslöser sind auf `workflow_dispatch` gekürzt, sonst ändert sich nichts an den Dateien.
+
+| Workflow | Wann | Was |
+|---|---|---|
+| `cloud-ci.yml` | Pull Request, Push auf `main` | Desktop-App und Web-Hülle bauen, Tests, Schichten, UI-Container |
+| `cloud-server.yml` | Änderungen in `cloud/server` | Datei-Server prüfen und für x86_64 und arm64 (Pi) bauen |
+| `cloud-windows.yml` | von Hand, Tag `cloud-v*` | Windows x64: `.msi`, portables `.zip`, `.exe` |
+| `upstream-sync.yml` | alle 6 Stunden | Upstream abgleichen (Pull Request oder Issue) |
+
+Windows-Version bauen: *Actions → Cloud Windows → Run workflow*, danach unter *Artifacts*
+`solidcraft-windows-x64` herunterladen.
+
 ## Web-Image (M0)
 
 Der Fork enthält schon SolidCraft's eigenen Workflow `.github/workflows/docker.yml`. Er baut die

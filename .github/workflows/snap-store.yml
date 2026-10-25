@@ -3,9 +3,8 @@
 # Skipped until the owner adds the SNAPCRAFT_STORE_CREDENTIALS secret; see docs/releasing.md.
 name: Snap Store
 
+# SolidCraft_Cloud: nur noch von Hand startbar (Upstream-Workflow, im Fork nicht gebraucht).
 on:
-  release:
-    types: [released]
   workflow_dispatch:
 
 permissions:

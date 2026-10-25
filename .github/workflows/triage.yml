@@ -3,17 +3,8 @@
 # (CONTRIBUTING.md, "Labels and triage"). The logic is in scripts/triage/ (tested in ci.yml).
 name: Triage
 
+# SolidCraft_Cloud: nur noch von Hand startbar (Upstream-Workflow, im Fork nicht gebraucht).
 on:
-  issues:
-    types: [opened, labeled, edited]
-  issue_comment:
-    types: [created]
-  # pull_request_target so PRs from forks can be labelled. It runs the base branch's
-  # scripts/triage and only lists the PR's changed paths; the PR's code is never checked out.
-  pull_request_target:
-    types: [opened]
-  schedule:
-    - cron: '41 5 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
