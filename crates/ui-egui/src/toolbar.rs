@@ -755,7 +755,10 @@ pub fn save(app: &mut SolveApp) {
         return;
     }
     if app.session.path.is_some() {
-        crate::save_job::start(app, "file.save", json!({}));
+        // Read-only, or changed on disk since it was opened: Save As, or a question, instead.
+        if crate::open_elsewhere::check_save(app) {
+            crate::save_job::start(app, "file.save", json!({}));
+        }
     } else {
         save_as(app);
     }
@@ -765,8 +768,19 @@ pub(crate) fn save_as(app: &mut SolveApp) {
     save_as_with_extension(app, solidcraft_engine::io::DESIGN_EXT);
 }
 
+/// Save As offering a copy's name ("Bracket copy"), so the file it is a copy of is kept.
+pub(crate) fn save_copy(app: &mut SolveApp) {
+    let name = crate::i18n::format("document.copy_name", &[("name", &app.session.doc.name)]);
+    save_as_named(app, &name, solidcraft_engine::io::DESIGN_EXT);
+}
+
 fn save_as_with_extension(app: &mut SolveApp, extension: &str) {
-    let name = format!("{}.{extension}", app.session.doc.name);
+    let name = app.session.doc.name.clone();
+    save_as_named(app, &name, extension);
+}
+
+fn save_as_named(app: &mut SolveApp, name: &str, extension: &str) {
+    let name = format!("{name}.{extension}");
     app.pick_save(&name, &[solidcraft_engine::io::DESIGN_EXT, "json"], |app, path| {
         // A save under way answers a closing tab when it ends.
         if let Some(path) = path
@@ -1304,7 +1318,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled() && info.enabled, &tr_label));
                 if ribbon_tooltip(app, resp, selected, info.disabled_reason.as_deref()).clicked() && info.enabled {
                     let id = selected.id;
-                    app.start_pinned(id);
+                    app.start_pinned(id, Some(whole));
                 }
                 if let Some(f) = family {
                     let ar = if labels {
@@ -1396,7 +1410,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                         menu = Some((resp.interact_pointer_pos().unwrap_or(cell.left_bottom()), c.id));
                     }
                     if ribbon_tooltip(app, resp, c, info.disabled_reason.as_deref()).clicked() && info.enabled {
-                        app.start(c.id);
+                        app.start_at(c.id, Some(cell));
                     }
                 }
             }
@@ -1517,8 +1531,8 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                                         RowAction::None => {}
                                         RowAction::Menu(at) => menu = Some((at, c.id)),
                                         RowAction::TogglePin => toggle = Some(c.id),
-                                        RowAction::Start => {
-                                            app.start(c.id);
+                                        RowAction::Start(rect) => {
+                                            app.start_at(c.id, Some(rect));
                                             ui.ctx().data_mut(|d| d.remove::<egui::Id>(egui::Id::new("sc_panel_open")));
                                         }
                                     }
@@ -1565,7 +1579,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
                                 );
                                 crate::scenario::publish_handle(&format!("toolbar:{}", c.id), response.rect.center());
                                 if response.clicked() {
-                                    app.start(c.id);
+                                    app.start_at(c.id, Some(response.rect));
                                     ui.close();
                                 }
                             }
@@ -1648,7 +1662,7 @@ fn assistant_button(app: &mut SolveApp, ui: &mut egui::Ui, at: Rect) {
 /// What a click on a panel drop-down row asks for.
 enum RowAction {
     None,
-    Start,
+    Start(Rect),
     Menu(egui::Pos2),
     TogglePin,
 }
@@ -1812,7 +1826,7 @@ fn dropdown_row(app: &SolveApp, ui: &mut egui::Ui, c: &'static solidcraft_engine
         return RowAction::Menu(resp.interact_pointer_pos().unwrap_or(rect.left_bottom()));
     }
     if resp.clicked() && info.enabled {
-        return RowAction::Start;
+        return RowAction::Start(rect);
     }
     RowAction::None
 }
@@ -1896,8 +1910,8 @@ fn sketch_menu_rows(
             RowAction::None => {}
             RowAction::Menu(at) => *menu = Some((at, c.id)),
             RowAction::TogglePin => *toggle = Some(c.id),
-            RowAction::Start => {
-                app.start(c.id);
+            RowAction::Start(rect) => {
+                app.start_at(c.id, Some(rect));
                 ui.ctx().data_mut(|d| d.remove::<egui::Id>(egui::Id::new("sc_panel_open")));
                 ui.close();
             }

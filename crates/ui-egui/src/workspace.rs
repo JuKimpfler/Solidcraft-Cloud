@@ -667,7 +667,8 @@ mod tests {
     #[test]
     fn promoted_long_labels_have_compact_ribbon_names() {
         let specs = solidcraft_engine::command_specs();
-        let english: std::collections::BTreeMap<String, String> = serde_json::from_str(include_str!("../../../assets/locales/en.json")).unwrap();
+        let english: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(include_str!(concat!(env!("OUT_DIR"), "/locales/en.json"))).unwrap();
         for section in SECTIONS {
             let (commands, count) = layout(section.tab, section.panel, &specs).unwrap();
             for command in commands.iter().take(count) {

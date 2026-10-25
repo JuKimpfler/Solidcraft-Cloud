@@ -632,7 +632,7 @@ fn edit_params(app: &SolveApp, k: &Tx) -> Result<Value, String> {
         *slot = if value == initial {
             *original
         } else {
-            let typed = doc.with_design_unit(value.trim(), *kind);
+            let typed = crate::length_input::expression(doc, value, *kind);
             let v = doc.eval(&typed, *kind).map_err(|e| format!("{label}: {e}"))?;
             if !v.is_finite() {
                 return Err(format!("{label}: not a finite number"));

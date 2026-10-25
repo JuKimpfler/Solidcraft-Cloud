@@ -180,6 +180,7 @@ impl eframe::App for App {
             log::warn!("a picture was still being drawn as the app closed");
         }
         solidcraft_ui_egui::recovery_ui::close(&mut self.solve);
+        solidcraft_ui_egui::open_elsewhere::close(&mut self.solve);
         solidcraft_engine::crash::end_session();
         // SolidCraft_Cloud: the designs this app had open are free for the others again.
         self.cloud.shutdown();
@@ -583,7 +584,8 @@ const FLOAT_DEPTH_BITS: u8 = 32;
 const STENCIL_BITS: u8 = 8;
 const MSAA: u16 = 4;
 
-fn app_viewport() -> Result<egui::ViewportBuilder, eframe::Error> {
+/// `custom_titlebar`: no OS decorations, the application bar is the title bar.
+fn app_viewport(custom_titlebar: bool) -> Result<egui::ViewportBuilder, eframe::Error> {
     // Let macOS use the bundle's layered icon; eframe's default bitmap would replace it.
     #[cfg(target_os = "macos")]
     let icon = egui::IconData::default();
@@ -596,7 +598,7 @@ fn app_viewport() -> Result<egui::ViewportBuilder, eframe::Error> {
         .with_inner_size([1600.0, 1000.0])
         .with_min_inner_size([960.0, 600.0])
         .with_drag_and_drop(true)
-        .with_decorations(!CUSTOM_TITLEBAR)
+        .with_decorations(!custom_titlebar)
         .with_fullsize_content_view(true)
         .with_titlebar_shown(false)
         .with_title_shown(false)
@@ -688,10 +690,16 @@ fn main() -> eframe::Result {
     // module on Windows, and on every system the startup step the app was in.
     #[cfg(target_os = "windows")]
     native_crash::install();
+    // Windows with only OpenGL to start: the system title bar instead of ours (#2063).
+    let started = match &wgpu_options.wgpu_setup {
+        eframe::egui_wgpu::WgpuSetup::CreateNew(setup) => setup.instance_descriptor.backends,
+        _ => eframe::wgpu::Backends::all(),
+    };
+    let custom_titlebar = CUSTOM_TITLEBAR && !startup::system_title_bar(cfg!(target_os = "windows"), started);
     eframe::egui_wgpu::set_startup_hook(startup_step);
     solidcraft_engine::crash::phase("window");
     let options = eframe::NativeOptions {
-        viewport: app_viewport()?,
+        viewport: app_viewport(custom_titlebar)?,
         // The window's pass (egui's) has no depth and one sample: the viewport draws its scene
         // offscreen with its own depth and MSAA, then blits it, so the UI pass pays for neither.
         depth_buffer: 0,
@@ -756,7 +764,7 @@ fn main() -> eframe::Result {
             let (services, cloud) = services(cc);
             let mut app = SolveApp::new(Session::default(), services);
             app.apply_off_thread = Some(solidcraft_ui_egui::dialogs::APPLY_AT_ONCE);
-            app.custom_titlebar = CUSTOM_TITLEBAR;
+            app.custom_titlebar = custom_titlebar;
             #[cfg(target_os = "windows")]
             {
                 // Windows: the taskbar button shows the mark even when slow first frames keep the
@@ -766,8 +774,8 @@ fn main() -> eframe::Result {
                 }
                 // The OS hit test offers the resize border, at the window's DPI, from the first
                 // message (#1381).
-                app.native_resize_border = CUSTOM_TITLEBAR && native_frame::install(cc);
-                if CUSTOM_TITLEBAR && !app.native_resize_border {
+                app.native_resize_border = custom_titlebar && native_frame::install(cc);
+                if custom_titlebar && !app.native_resize_border {
                     eprintln!("SolidCraft window: no native resize border; egui edge zones instead");
                 }
             }
@@ -819,6 +827,9 @@ fn main() -> eframe::Result {
                 app.session.mark_saved();
                 app.session.undo.clear();
             }
+            // Lock files next to open designs: a design open on another computer says so (#5467),
+            // the files given at launch included.
+            solidcraft_ui_egui::open_elsewhere::start(&mut app);
             // A launch from Finder: its files arrived before the window.
             #[cfg(target_os = "macos")]
             let files = {
@@ -1037,7 +1048,7 @@ mod icon_tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_preserves_the_bundle_icon_instead_of_setting_a_runtime_bitmap() {
-        let viewport = super::app_viewport().expect("viewport");
+        let viewport = super::app_viewport(super::CUSTOM_TITLEBAR).expect("viewport");
         assert_eq!(viewport.icon.as_deref(), Some(&eframe::egui::IconData::default()));
         assert_eq!(viewport.app_id.as_deref(), Some(super::APP_ID));
     }
@@ -1045,7 +1056,7 @@ mod icon_tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn desktop_viewport_supplies_the_original_mark_to_the_window() {
-        let viewport = super::app_viewport().expect("viewport");
+        let viewport = super::app_viewport(super::CUSTOM_TITLEBAR).expect("viewport");
         let icon = viewport.icon.expect("running window must have an icon");
         assert_eq!((icon.width, icon.height), (64, 64));
         assert_eq!(icon.rgba, super::app_icon::rgba(64).expect("original mark"));

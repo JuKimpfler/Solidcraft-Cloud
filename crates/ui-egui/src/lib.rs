@@ -89,6 +89,7 @@ pub mod install;
 pub mod issue_report;
 pub mod joint_drag;
 pub mod keymap;
+mod length_input;
 mod linked_source;
 #[cfg(test)]
 mod loft_rails_dialog_tests;
@@ -174,6 +175,7 @@ mod fillet_spline_handle_tests;
 pub mod mouse_gesture;
 pub(crate) mod navigation;
 pub use navigation::WebWheelGestures;
+pub mod open_elsewhere;
 pub(crate) mod open_meshing;
 pub mod params_dialog;
 pub(crate) mod pick_index;
@@ -260,6 +262,7 @@ pub mod ui_kit;
 #[cfg(test)]
 mod ui_kit_guard_tests;
 pub mod update;
+mod value_step;
 pub mod view_pick;
 pub mod viewport;
 mod viewport_layout;
@@ -492,6 +495,12 @@ pub struct SolveApp {
     pub quit_requested: bool,
     /// Autosave into the recovery folder (the desktop app turns it on).
     pub autosave: Option<recovery_ui::Autosaves>,
+    /// Lock files next to the open designs (the desktop app turns them on; #5467).
+    pub locks: Option<open_elsewhere::Locks>,
+    /// Opens waiting for "this design is open elsewhere" to be answered, first asked first.
+    pub lock_prompts: Vec<open_elsewhere::LockPrompt>,
+    /// A Save waiting for "the file changed on disk" to be answered.
+    pub disk_prompt: bool,
     /// Designs left by crashed apps, offered for recovery.
     pub recoverable: Vec<solidcraft_engine::recovery::Entry>,
     /// The bodies of a just-opened Y-up file, offered to be stood up (`stand_up`).
@@ -540,6 +549,7 @@ pub struct SolveApp {
     /// The agent chat panel (docs/design/in-app-agent-chat.md).
     pub agent_chat: agent_chat::AgentChat,
     pending_shots: Vec<(u64, Option<String>, std::sync::mpsc::Sender<Value>, f64)>,
+    shot_chat_turns: std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     queued_shots: Vec<(u64, f64, u32)>,
     shot_token: u64,
     styled: bool,
@@ -639,6 +649,9 @@ impl SolveApp {
             status_undo: false,
             quit_requested: false,
             autosave: None,
+            locks: None,
+            lock_prompts: Vec::new(),
+            disk_prompt: false,
             recoverable: Vec::new(),
             stand_up: None,
             stand_up_occurrence: None,
@@ -663,6 +676,7 @@ impl SolveApp {
             control_answering: Vec::new(),
             agent: Default::default(),
             pending_shots: Vec::new(),
+            shot_chat_turns: Default::default(),
             queued_shots: Vec::new(),
             shot_token: 0,
             styled: false,
@@ -922,6 +936,7 @@ impl SolveApp {
     /// What follows a command's run, whether it ran here or on a worker (a save): its echo,
     /// the status line when it failed, what opening and saving update, and the toolbar tab.
     pub(crate) fn finish_command(&mut self, id: &str, r: &Result<Value, String>) {
+        let id = solidcraft_engine::find_command(id).map_or(id, |spec| spec.id);
         match r {
             Ok(v) => {
                 // Programmatic callers (the control channel, scripts) run outside a render
@@ -940,6 +955,7 @@ impl SolveApp {
                     prefs::apply_new_design(self);
                 }
                 if matches!(id, "file.new" | "doc.open" | "doc.recover") {
+                    documents::reset_chat(self);
                     render_workspace::reset_document(self);
                     dim_view::cancel();
                     self.menu.props = None;
@@ -981,19 +997,24 @@ impl SolveApp {
         true
     }
 
-    /// Start a command the way a toolbar click does: interactive tools and dialogs for commands
+    /// Start a command the way a toolbar click does: interactive tools, menus and dialogs for commands
     /// that have them, otherwise run it with defaults.
     pub fn start(&mut self, id: &str) {
-        self.start_with_variant_memory(id, true);
+        self.start_at(id, None);
+    }
+
+    /// Start an interactive command with its menu anchored below the invoking button.
+    pub(crate) fn start_at(&mut self, id: &str, opener: Option<egui::Rect>) {
+        self.start_with_variant_memory(id, true, opener);
     }
 
     /// A dedicated toolbar button starts its exact tool without replacing the sketch family's
     /// main button. Choosing a variant from a menu still uses `start` and remembers that choice.
-    pub(crate) fn start_pinned(&mut self, id: &str) {
-        self.start_with_variant_memory(id, false);
+    pub(crate) fn start_pinned(&mut self, id: &str, opener: Option<egui::Rect>) {
+        self.start_with_variant_memory(id, false, opener);
     }
 
-    fn start_with_variant_memory(&mut self, id: &str, remember_variant: bool) {
+    fn start_with_variant_memory(&mut self, id: &str, remember_variant: bool, opener: Option<egui::Rect>) {
         if id == "ui.palette" {
             shortcut_box::open(self, None);
             return;
@@ -1118,6 +1139,15 @@ impl SolveApp {
         }
         if remember_variant && solidcraft_engine::find_command(id).is_some_and(|c| c.info(&self.session).enabled) {
             self.preferences.sketch_variants.remember(id);
+        }
+        if id == "document.units" {
+            if let Some(rect) = opener {
+                context_menu::toggle_for(self, rect, rect.left_bottom(), context_menu::Target::Units);
+            } else {
+                let at = self.viewport.rect.map(|rect| rect.center()).unwrap_or(egui::pos2(300.0, 200.0));
+                context_menu::open_for(self, at, context_menu::Target::Units);
+            }
+            return;
         }
         if id == "parameters.change" {
             params_dialog::open(self);
@@ -1694,6 +1724,7 @@ impl SolveApp {
             toolbar::shortcuts(self, ctx);
         }
         recovery_ui::tick(self);
+        open_elsewhere::tick(self, ctx);
         update::tick(self, ctx);
         if self.issue_report.draft.is_none() && self.file_picker.is_none() {
             // Files dropped on the agent chat attach to its next message instead.
@@ -1753,6 +1784,7 @@ impl SolveApp {
 
     /// Lay out the whole window.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        value_step::set_enabled(ui.ctx(), self.preferences.step_values);
         let t0 = now_ms();
         // The first frames draw with the bundled faces while the system's CJK, Hangul and Thai
         // faces are read on a thread; the fonts are installed again once they are there.
@@ -1800,6 +1832,7 @@ impl SolveApp {
         file_load::show(self, ui.ctx());
         open_meshing::show(self, ui.ctx());
         documents::prompt(self, ui.ctx());
+        open_elsewhere::show(self, ui.ctx());
         update::show(self, ui.ctx());
         install::show(self, ui.ctx());
         // Settings › AI's Add agent dialog: Settings opens over Home too (#3483).
@@ -1838,6 +1871,8 @@ impl SolveApp {
         if floating || left_timeline || !show_timeline {
             self.shell.history = None;
         }
+        // The model draws next: a dialog the toolbar closed last frame no longer shows its sketch.
+        dialogs::sync_feature_edit_sketch(self);
         let full = ui.available_rect_before_wrap();
         if floating {
             let cards = shell::Cards::new(full, self.ui.layout, toolbar::ribbon_height(self.preferences.ribbon_labels));
@@ -1957,6 +1992,9 @@ impl SolveApp {
             // Held requests go first, in order, once nothing makes them wait.
             let held = if waits || shot_waits { None } else { self.control_held.pop_front() };
             let Some(req) = held.or_else(|| rx.as_ref().and_then(|rx| rx.try_recv().ok())) else { break };
+            if req.refuse_cancelled_chat() {
+                continue;
+            }
             if shot_waits {
                 if self.control_held.len() < MAX_HELD {
                     self.control_held.push_back(req);
@@ -1983,8 +2021,7 @@ impl SolveApp {
                 ctx.request_repaint();
                 continue;
             };
-            let reply = req.reply.clone();
-            if agent_cursor::intercept(self, &req.method, &req.params, &reply) {
+            if agent_cursor::intercept(self, &req) {
                 ctx.request_repaint();
                 continue;
             }
@@ -2000,6 +2037,9 @@ impl SolveApp {
 
     /// Run a control request here, now, and reply (or queue the screenshot it asks for).
     pub(crate) fn run_control(&mut self, ctx: &egui::Context, req: ControlRequest) {
+        if req.refuse_cancelled_chat() {
+            return;
+        }
         let reply = req.reply.clone();
         match control::handle(self, ctx, &req) {
             control::Outcome::Done(v) => {
@@ -2013,6 +2053,9 @@ impl SolveApp {
             control::Outcome::Screenshot { path } => {
                 self.shot_token += 1;
                 let token = self.shot_token;
+                if let Some(turn) = req.chat_turn {
+                    self.shot_chat_turns.insert(token, turn);
+                }
                 self.queued_shots.push((token, now_ms() + 150.0, 0));
                 self.pending_shots.push((token, path, reply, now_ms() + 8000.0));
             }
@@ -2037,6 +2080,19 @@ impl SolveApp {
     }
 
     fn collect_screenshots(&mut self, ctx: &egui::Context) {
+        // A screenshot requested in one tab must never return or save a frame of another.
+        let chat_turns = &mut self.shot_chat_turns;
+        let queued_shots = &mut self.queued_shots;
+        self.pending_shots.retain(|(token, _, reply, _)| {
+            if control::chat_turn_cancelled(chat_turns.get(token).map(std::sync::Arc::as_ref)) {
+                chat_turns.remove(token);
+                queued_shots.retain(|(queued, ..)| queued != token);
+                let _ = reply.send(control::cancelled_chat_response());
+                false
+            } else {
+                true
+            }
+        });
         if self.pending_shots.is_empty() && !issue_report::pending(self) {
             return;
         }
@@ -2057,17 +2113,19 @@ impl SolveApp {
             issue_report::receive(self, token, image.clone());
             if let Some(i) = self.pending_shots.iter().position(|(t, ..)| *t == token) {
                 let (_, path, reply, _) = self.pending_shots.remove(i);
+                self.shot_chat_turns.remove(&token);
                 let _ = reply.send(control::save_screenshot(&image, path.as_deref()));
             }
         }
         let now = now_ms();
         // Hidden while waiting: no frame is coming.
         let hidden = window_hidden(ctx);
-        self.pending_shots.retain(|(_, _, reply, deadline)| {
+        self.pending_shots.retain(|(token, _, reply, deadline)| {
             if now < *deadline && !hidden {
                 return true;
             }
             let _ = reply.send(json!({"ok": false, "error": "no frame was presented (window hidden?); use ui.render"}));
+            self.shot_chat_turns.remove(token);
             false
         });
     }

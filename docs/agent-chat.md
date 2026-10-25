@@ -108,6 +108,12 @@ clears the files waiting on the chips too.
 
 ## Typing while the agent works
 
+Each design tab has its own conversation, agent session, draft, attachments and queued messages.
+A new tab starts with an empty chat. Switching away stops the current turn and keeps its
+completed changes in that design's undo history. Returning restores the conversation; queued
+messages wait for **Send**. Closing a design closes its conversation. Conversations are kept
+only while the tabs remain open.
+
 The input stays enabled during a turn. **Enter** queues the message: it shows in the conversation
 as a **Queued** bubble that you can **Edit** or remove (×) until it is sent. Several queued
 messages go as one prompt, in order, when the turn ends normally.
@@ -208,7 +214,7 @@ Grok Build also supports `XAI_API_KEY` for users who choose API authentication.
   OpenAI-compatible endpoint for its models; an Anthropic-compatible one gets a short message,
   because not every such endpoint lists models (Qwen's has no model list). For these agents
   SolidCraft runs the conversation itself, with the same tools, limits and questions as for a
-  coding agent, and at most 24 model requests per message. **Request timeout** is how long one model request may
+  coding agent, and no cap on model requests per message (Stop ends it). **Request timeout** is how long one model request may
   take: 300 s by default, from 30 s to an hour. A slow local model (a large model on modest
   hardware, or a long message with many tool results) may need more; raise it here or in the
   endpoint's entry under **Agents**, where a change applies from the next request. A request that
@@ -318,9 +324,10 @@ saves, opens or inserts. A sweep's or pattern's `path` (curve ids) and an occurr
   everything that's waiting, and a question nobody answers is declined after four minutes. The
   [MCP server's folder limits](mcp.md) still apply after you allow: the design's folder, the
   recovery folder and the server's own scratch folder.
-- **A limit per message.** The agent may make 24 changes per message by default; you can set
-  the number on the AI page. Reading the design doesn't count. When it reaches the limit, it's
-  told to stop and report what's left; send another message to let it carry on.
+- **An optional limit per message.** There's none by default. Untick **Unlimited** on the AI
+  page to cap the changes the agent may make per message (it starts at 24). Reading the design
+  doesn't count. At the limit, it's told to stop and report what's left; send another message to
+  let it carry on. **Stop** always works.
 - **No crash reports,** whatever the permissions. Crash reports can hold other designs and file
   paths.
 - **Not the rest of the app.** It can't click the interface, change settings, quit, or drive the

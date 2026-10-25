@@ -31,7 +31,7 @@ fn joint_from_two_snaps() {
     d.pick(&app.session, fb);
     if let Kind::Assembly(Asm::Joint(f)) = &mut d.kind {
         f.kind = 1;
-        f.fit_limits();
+        f.fit_limits(&solidcraft_engine::doc::Document::default());
         f.limits[0] = (true, "-45 deg".into(), "45 deg".into());
     }
     let c = apply_commands(&app, &d).unwrap();
@@ -76,7 +76,7 @@ fn revolute_joint_uses_the_picked_straight_edges() {
     }
     if let Kind::Assembly(Asm::Joint(f)) = &mut d.kind {
         f.kind = 1;
-        f.fit_limits();
+        f.fit_limits(&app.session.doc);
     }
     for (id, p) in apply_commands(&app, &d).unwrap() {
         app.run(&id, p).unwrap();
@@ -870,4 +870,41 @@ fn motion_trace_keeps_the_picked_point_path() {
     app.run("parameters.change", json!({"name":height,"expression":"4 mm"})).unwrap();
     let updated = &app.session.doc.sketch(sketch).unwrap().wires[0].fit;
     assert!(updated.len() == wire.fit.len() && updated.iter().zip(&wire.fit).all(|(a, b)| (*a - *b - Vec3::new(0.0, 0.0, 2.0)).len() < 1e-6));
+}
+
+#[test]
+fn inch_joint_offsets_limits_and_drive_values_keep_their_units() {
+    let mut app = two_boxes();
+    app.run("document.units", json!({"units":"in"})).unwrap();
+    app.start("joint.create");
+    let mut d = app.dialog.clone().unwrap();
+    d.pick(&app.session, face_sel(&app.session, Vec3::new(10.0, 10.0, 10.0)).unwrap());
+    d.pick(&app.session, face_sel(&app.session, Vec3::new(40.0, 10.0, 0.0)).unwrap());
+    let Kind::Assembly(Asm::Joint(f)) = &mut d.kind else { panic!("no joint") };
+    f.kind = TYPES.iter().position(|t| *t == "slider").unwrap();
+    f.fit_limits(&app.session.doc);
+    assert_eq!((f.limits[0].1.as_str(), f.limits[0].2.as_str()), ("0 in", "20 in"));
+    f.offset[0] = "0.25".into();
+    f.offset[2] = "2 mm".into();
+    f.limits[0] = (true, "0".into(), "0.5".into());
+    let (_, p) = apply_commands(&app, &d).unwrap().remove(0);
+    assert_eq!(p["offset"], json!("2 mm"));
+    assert_eq!(p["limits"], json!([["0 in", "0.5 in"]]));
+    let origin = &p["a"]["frame"]["origin"];
+    let at = Vec3::new(origin[0].as_f64().unwrap(), origin[1].as_f64().unwrap(), origin[2].as_f64().unwrap());
+    assert!((at.dist(Vec3::new(10.0, 10.0, 10.0)) - 6.35).abs() < 1e-9);
+    app.run("joint.create", p).unwrap();
+    let joint = app.session.doc.assembly.joints[0].id;
+    app.start("joint.drive");
+    let mut d = app.dialog.clone().unwrap();
+    let Kind::Assembly(Asm::Drive { values, .. }) = &mut d.kind else { panic!("no drive") };
+    values[0] = "0.25".into();
+    let (_, p) = apply_commands(&app, &d).unwrap().remove(0);
+    assert_eq!(p["values"], json!(["0.25 in"]));
+    app.run("joint.drive", p).unwrap();
+    let actual = app.session.doc.assembly.joints.iter().find(|j| j.id == joint).unwrap().values[0];
+    assert!((actual - 6.35).abs() < 1e-9, "{actual}");
+    let edit = edit_joint(&app, joint).unwrap();
+    let Kind::Assembly(Asm::Joint(f)) = edit.kind else { panic!("no edit") };
+    assert_eq!((f.limits[0].1.as_str(), f.limits[0].2.as_str()), ("0 in", "0.5 in"));
 }
