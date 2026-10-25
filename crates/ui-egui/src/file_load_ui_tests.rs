@@ -234,6 +234,9 @@ fn a_control_import_passes_up_and_names_on() {
     let mut src = Session::default();
     src.execute("solid.box", &json!({"length": 10, "width": 40, "height": 5})).unwrap();
     src.execute("file.export", &json!({"path": path})).unwrap();
+    // Another program's file: SolidCraft's own exports are not offered (#5150).
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replace("'SolidCraft','SolidCraft'", "'SolidCraft','Example CAD'")).unwrap();
 
     // The reply, the part's height and whether the offer is up, for an import by this window.
     let import = |params: serde_json::Value| {
@@ -268,6 +271,39 @@ fn a_control_import_passes_up_and_names_on() {
     // Z up said by the caller: kept as it is, and not asked about either.
     let (_, size, offered) = import(json!({"path": path, "up": "z"}));
     assert!(size[1] > 39.9 && !offered, "{size:?} {offered}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #4676: a control-channel import's `matrix` and `name` reach the command, as they do when it
+/// runs in a session: the part lands where the matrix puts it, under the name given.
+#[test]
+fn a_control_import_passes_its_matrix_and_name_on() {
+    let dir = scratch("import-matrix");
+    let path = dir.join("plate.step").to_string_lossy().to_string();
+    let mut src = Session::default();
+    src.execute("solid.box", &json!({"length": 60, "width": 40, "height": 5})).unwrap();
+    src.execute("file.export", &json!({"path": path})).unwrap();
+    let params = json!({"path": path, "matrix": [1, 0, 0, 100, 0, 1, 0, 0, 0, 0, 1, 0], "name": "Bracket"});
+    let mut w = Win::new();
+    let (tx, rx) = std::sync::mpsc::channel();
+    w.app.control_rx = Some(rx);
+    let (req, reply_rx) = crate::control::ControlRequest::new("engine.execute", json!({"command": "file.insert_step", "params": params.clone()}));
+    tx.send(req).unwrap();
+    let mut reply = None;
+    for _ in 0..100_000 {
+        w.frame(vec![]);
+        reply = reply_rx.try_recv().ok();
+        if reply.is_some() {
+            break;
+        }
+    }
+    let reply = reply.expect("the import was answered");
+    assert_eq!(reply["ok"], true, "{reply}");
+    let mut sync = Session::default();
+    assert_eq!(reply["result"], sync.execute("file.insert_step", &params).unwrap(), "the window's reply is the session's");
+    let b = solidcraft_engine::view::bounds(&w.app.session);
+    assert!((b.min.x - 100.0).abs() < 1e-6 && (b.max.x - 160.0).abs() < 1e-6, "moved by the matrix: {b:?}");
+    assert!(w.app.session.doc.components.iter().any(|c| c.name == "Bracket"), "named as asked");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -425,5 +461,57 @@ fn opening_a_large_design_never_stalls_the_window() {
         let (_, (ms, phase)) = open_timed(&path);
         assert!(ms < BUDGET_MS, "{name}: a {ms:.0} ms frame while {phase}");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #3171: the second STEP open completes even if the cancelled worker has not returned.
+#[test]
+fn cancelling_a_step_open_releases_the_slot_before_the_worker_returns() {
+    let dir = scratch("step-cancel-reopen");
+    let path = dir.join("box.step").to_string_lossy().to_string();
+    let mut src = Session::default();
+    src.execute("solid.box", &json!({"length": 10, "width": 20, "height": 30})).unwrap();
+    src.execute("file.export", &json!({"path": path})).unwrap();
+    let mut expected = Session::default();
+    expected.execute("doc.open", &json!({"path": path})).unwrap();
+
+    let mut w = Win::new();
+    let blank = w.app.session.doc.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    w.app.file_load.worker_gate = Some((started_tx, release_rx));
+    let (first, first_reply) = crate::control::ControlRequest::new("engine.execute", json!({"command":"doc.open", "params":{"path":path}}));
+    assert!(crate::file_load::control(&mut w.app, first).is_none());
+    started_rx.recv_timeout(std::time::Duration::from_secs(60)).unwrap();
+    for _ in 0..3 {
+        w.frame(vec![]);
+    }
+    let cancel = crate::scenario::handle_at("file_loading:cancel").unwrap();
+    w.gesture(&[cancel]);
+    assert!(w.app.file_load.idle(), "Cancel releases the slot while the first worker is still held");
+    let cancelled = first_reply.try_recv().expect("the cancelled caller is answered immediately");
+    assert_eq!(cancelled["ok"], false);
+    assert!(cancelled["error"].as_str().unwrap().contains("cancelled"));
+    assert!(std::sync::Arc::ptr_eq(&blank, &w.app.session.doc));
+
+    let (second, second_reply) = crate::control::ControlRequest::new("engine.execute", json!({"command":"doc.open", "params":{"path":path}}));
+    assert!(crate::file_load::control(&mut w.app, second).is_none());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let reply = loop {
+        w.frame(vec![]);
+        if let Ok(reply) = second_reply.try_recv() {
+            break reply;
+        }
+        assert!(std::time::Instant::now() < deadline, "the second import completes before releasing the first");
+        std::thread::yield_now();
+    };
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(fingerprint(&w.app.session), fingerprint(&expected));
+    assert_eq!(w.app.docs.count(), 1);
+    release_tx.send(()).unwrap();
+    for _ in 0..3 {
+        w.frame(vec![]);
+    }
+    assert_eq!(fingerprint(&w.app.session), fingerprint(&expected));
     let _ = std::fs::remove_dir_all(&dir);
 }

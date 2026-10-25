@@ -38,6 +38,27 @@ fn rectangle_tool(s: &mut Session, name: &str, p0: [f64; 2], p1: [f64; 2]) {
 }
 
 #[test]
+fn plain_solid_sheet_operations_explain_how_to_start_sheet_metal() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 100, "width": 60, "height": 2.5}));
+    let before = s.doc.to_json();
+    for (command, params) in [
+        ("sheet.flange", json!({"type": "edge", "edges": [[50, 0, 2.5]], "height": 15})),
+        ("sheet.flat_pattern", json!({})),
+        ("sheet.export_dxf", json!({"per_body": true})),
+    ] {
+        let error = s.execute(command, &params).unwrap_err();
+        let crate::EngineError::BadParams { cmd, msg } = error else { panic!("{error}") };
+        assert_eq!(cmd, command);
+        assert_eq!(
+            msg,
+            "there is no sheet metal body: start one with Flange > Base, or turn a plate into sheet metal with Convert to Sheet Metal (pick its large flat face)"
+        );
+        assert_eq!(s.doc.to_json(), before);
+    }
+}
+
+#[test]
 fn side_edge_flanges_across_a_bend_keep_their_relief_through_rebuild_and_reopen() {
     use solidcraft_geom::Vec3;
 
@@ -226,15 +247,16 @@ fn unsupported_sheet_machining_is_atomic_but_true_no_change_is_allowed() {
 }
 
 #[test]
-fn empty_sheet_intersection_removes_geometry_and_metadata_together() {
+fn empty_sheet_intersection_keeps_geometry_and_metadata_together() {
     let mut s = Session::default();
     base(&mut s, 100.0, 60.0);
     rectangle_tool(&mut s, "Outside", [120.0, 20.0], [130.0, 30.0]);
-    run(&mut s, "solid.extrude", json!({"sketch":"Outside","through_all":true,"direction":"symmetric","operation":"intersect"}));
-    assert!(s.model.state().bodies.is_empty());
-    assert!(s.model.state().sheets.is_empty());
-    assert!(s.execute("sheet.unfold", &json!({})).is_err());
-    run(&mut s, "edit.undo", json!({}));
+    let before = s.doc.to_json();
+    let result = s.execute("solid.extrude", &json!({"sketch":"Outside","through_all":true,"direction":"symmetric","operation":"intersect"}));
+    assert!(result.as_ref().err().is_some_and(|e| e.to_string().contains("the intersection is empty")), "{result:?}");
+    assert_eq!(s.doc.to_json(), before);
+    assert_eq!(s.model.state().bodies.len(), 1);
+    assert_eq!(s.model.state().sheets.len(), 1);
     assert!((volume(&mut s) - 15000.0).abs() < 1e-6);
 }
 
@@ -369,8 +391,8 @@ fn deleting_sheet_material_prunes_cosmetic_threads_and_undo_restores_them() {
     run(&mut s, "sheet.flange", json!({"sketch":"ThreadPlate","profiles":[{"point":[10,10]}]}));
     run(&mut s, "solid.thread", json!({"face":[55,30,1],"designation":"M10"}));
     assert_eq!(s.model.state().threads.len(), 1);
-    rectangle_tool(&mut s, "Outside", [120.0, 20.0], [130.0, 30.0]);
-    run(&mut s, "solid.extrude", json!({"sketch":"Outside","through_all":true,"direction":"symmetric","operation":"intersect"}));
+    rectangle_tool(&mut s, "All", [-10.0, -10.0], [110.0, 70.0]);
+    run(&mut s, "solid.extrude", json!({"sketch":"All","through_all":true,"direction":"symmetric","operation":"cut"}));
     assert!(s.model.state().bodies.is_empty());
     assert!(s.model.state().sheets.is_empty());
     assert!(s.model.state().threads.is_empty());
@@ -412,7 +434,7 @@ fn sheet_pocket_transfer_keeps_local_depth_world_pose_and_history() {
     run(&mut s, "solid.extrude", json!({"sketch":"Pocket","distance":1,"operation":"cut"}));
     let name = s.model.state().sheets[0].body.clone();
     check(&s, &name, 0, Vec3::ZERO, Vec3::Y, false);
-    let destination = run(&mut s, "component.create", json!({"name":"Machined","parent":0}));
+    let destination = run(&mut s, "component.create", json!({"name":"Machined","parent":0,"grounded":false}));
     let component = destination["component"].as_u64().unwrap();
     let occurrence = destination["occurrence"].as_u64().unwrap();
     run(&mut s, "occurrence.move", json!({"occurrence":occurrence,"translate":[30,20,10],"axis":[1,0,0],"angle":"90 deg","capture":true}));
@@ -2216,18 +2238,17 @@ fn partial_depth_intersect_keeps_disconnected_tool_islands_and_annular_curves() 
 }
 
 #[test]
-fn partial_depth_intersect_deletes_material_already_removed_by_a_pocket_atomically() {
+fn partial_depth_intersect_of_material_already_removed_by_a_pocket_is_refused() {
     let mut s = Session::default();
     base(&mut s, 100.0, 60.0);
     rectangle_tool(&mut s, "Removed", [20.0, 20.0], [30.0, 30.0]);
     run(&mut s, "solid.extrude", json!({"sketch":"Removed","distance":1,"operation":"cut"}));
-    run(&mut s, "solid.extrude", json!({"sketch":"Removed","distance":1,"operation":"intersect"}));
-    assert!(s.model.state().bodies.is_empty());
-    assert!(s.model.state().sheets.is_empty());
-    run(&mut s, "edit.undo", json!({}));
+    let before = s.doc.to_json();
+    let result = s.execute("solid.extrude", &json!({"sketch":"Removed","distance":1,"operation":"intersect"}));
+    assert!(result.as_ref().err().is_some_and(|e| e.to_string().contains("the intersection is empty")), "{result:?}");
+    assert_eq!(s.doc.to_json(), before);
+    assert_eq!(s.model.state().sheets.len(), 1);
     assert!((volume(&mut s) - 14900.0).abs() < 1e-6);
-    run(&mut s, "edit.redo", json!({}));
-    assert!(s.model.state().bodies.is_empty());
 }
 
 #[test]
@@ -2248,7 +2269,7 @@ fn partial_depth_intersect_flipped_tool_and_transferred_sheet_keep_depth_side_an
     run(&mut s, "solid.extrude", json!({"sketch":"RetainDepth","distance":1,"start_offset":0.5,"operation":"intersect","name":"RetainSlab"}));
     let before = s.world_state().bodies[0].mesh().bounds();
     let name = s.model.state().sheets[0].body.clone();
-    let destination = run(&mut s, "component.create", json!({"name":"Destination","parent":0}));
+    let destination = run(&mut s, "component.create", json!({"name":"Destination","parent":0,"grounded":false}));
     let owner = destination["component"].as_u64().unwrap();
     let occurrence = destination["occurrence"].as_u64().unwrap();
     run(&mut s, "occurrence.move", json!({"occurrence":occurrence,"translate":[30,20,10],"axis":[1,0,0],"angle":"90 deg","capture":true}));
@@ -2294,7 +2315,7 @@ fn partial_depth_intersect_full_gauge_in_rotated_frames_does_not_invent_pockets(
         let mut s = Session::default();
         base(&mut s, 100.0, 60.0);
         let name = s.model.state().sheets[0].body.clone();
-        let destination = run(&mut s, "component.create", json!({"name":"Destination","parent":0}));
+        let destination = run(&mut s, "component.create", json!({"name":"Destination","parent":0,"grounded":false}));
         let owner = destination["component"].as_u64().unwrap();
         run(
             &mut s,
@@ -2472,7 +2493,7 @@ fn partial_depth_intersect_sub_extrusion_resolution_layers_refuse_atomically() {
         let mut s = Session::default();
         base(&mut s, 100.0, 60.0);
         let name = s.model.state().sheets[0].body.clone();
-        let destination = run(&mut s, "component.create", json!({"name":"Far","parent":0}));
+        let destination = run(&mut s, "component.create", json!({"name":"Far","parent":0,"grounded":false}));
         let owner = destination["component"].as_u64().unwrap();
         run(
             &mut s,
@@ -4981,5 +5002,54 @@ fn mirroring_or_copying_a_sheet_body_leaves_the_original_sheet_as_it_was() {
         copy["body"] = original["body"].clone();
         assert_eq!(flat_points(&copy["outline"], 1.0), flat_points(&original["outline"], 1.0), "{name}");
         assert_eq!(copy["bends"], original["bends"], "{name}");
+    }
+}
+
+/// The top and bottom face names of every panel of the first sheet body, by sheet face.
+fn panel_face_names(s: &mut Session) -> std::collections::BTreeMap<String, String> {
+    let body = s.model.state().bodies[0].name.clone();
+    let faces = run(s, "model.faces", json!({"body": body}))["faces"].as_array().cloned().unwrap_or_default();
+    faces
+        .iter()
+        .filter_map(|f| {
+            let sheet = f["sheet_face"].as_str()?;
+            (sheet.ends_with(":top") || sheet.ends_with(":bottom")).then(|| (sheet.to_string(), f["name"].as_str().unwrap_or("").to_string()))
+        })
+        .collect()
+}
+
+/// An unfold keeps the base where it is and lays the flanges out beside it: the flat face that
+/// spans them and the bend strips between them is the base's face, and is named after it; so are
+/// the faces the refold makes of it, at every size. It was named after the unfold whenever few of
+/// its sample points fell on the base (the bend strips are many small triangles, the base two big
+/// ones), and that changed with the sizes: a refolded part's faces were renamed by a size change,
+/// and joints and sketches on them lost their faces.
+#[test]
+fn an_unfolded_sheets_flat_face_is_named_after_its_base_at_every_size() {
+    let mut s = Session::default();
+    run(&mut s, "sheet.manage_rules", json!({"name":"AL2","thickness":"2 mm","k_factor":0.5,"bend_radius":"1 mm","gap":"0.5 mm","active":true}));
+    run(&mut s, "parameters.add", json!({"name": "H", "expression": "5 mm"}));
+    base(&mut s, 200.0, 150.0);
+    run(&mut s, "sheet.flange", json!({"edges":[[100,0,2],[200,75,2],[100,150,2]],"height":"H","angle":"90 deg"}));
+    let folded = panel_face_names(&mut s);
+    let (top, bottom) = (folded["sheet:Body1:base:top"].clone(), folded["sheet:Body1:base:bottom"].clone());
+    run(&mut s, "sheet.unfold", json!({}));
+    let unfold = s.doc.features.last().map_or(0, |f| f.id);
+    run(&mut s, "sheet.refold", json!({}));
+    let stem = |n: &str| solidcraft_doc::naming::strip_piece(n).to_string();
+    for h in ["5 mm", "60 mm", "5 mm"] {
+        run(&mut s, "parameters.change", json!({"name": "H", "expression": h}));
+        let body = s.model.state().bodies[0].name.clone();
+        let flat_state = s.model.results.iter().find(|r| r.id == unfold).map(|r| r.state.clone());
+        {
+            let st = flat_state.expect("the unfold's state");
+            let flat = st.bodies.iter().find(|b| b.name == body).map(|b| solidcraft_doc::naming::face_names(b).as_ref().clone()).unwrap_or_default();
+            assert!(flat.iter().any(|n| stem(n) == stem(&top)) && flat.iter().any(|n| stem(n) == stem(&bottom)), "H {h}: the flat faces {flat:?}");
+            assert!(!flat.iter().any(|n| n.starts_with(&format!("F{unfold}:"))), "H {h}: a flat face named after the unfold: {flat:?}");
+        }
+        for (sheet, name) in panel_face_names(&mut s) {
+            let want = if sheet.ends_with(":top") { &top } else { &bottom };
+            assert_eq!(stem(&name), stem(want), "H {h}: {sheet} is {name} after the refold");
+        }
     }
 }

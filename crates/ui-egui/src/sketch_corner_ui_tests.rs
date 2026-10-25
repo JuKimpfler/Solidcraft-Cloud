@@ -128,7 +128,7 @@ fn offset_window_without_a_curve_reports_it_and_keeps_the_window_open() {
 #[test]
 fn clicked_extend_endpoint_reaches_exact_ellipse_and_preserves_support() {
     let mut h = crate::scenario::Harness::new();
-    h.app.ui.show_origin = true;
+    h.app.set_origin_shown(true);
     h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
     h.app.run("sketch.ellipse", json!({"center":[20,0],"major":[30,0],"minor_radius":5})).unwrap();
     h.app.run("sketch.constraint.fix", json!({"entity":"e1"})).unwrap();
@@ -200,7 +200,7 @@ fn has_point(h: &crate::scenario::Harness, at: Vec2) -> bool {
 fn corner_window_takes_the_corner_then_applies_the_typed_size() {
     for command in ["sketch.fillet", "sketch.chamfer.equal_distance", "sketch.chamfer.distance_angle", "sketch.chamfer.two_distance"] {
         let mut h = crate::scenario::Harness::new();
-        h.app.ui.show_origin = true;
+        h.app.set_origin_shown(true);
         h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
         h.app.run("sketch.rectangle.two_point", json!({"p0":[0,0],"p1":[20,30]})).unwrap();
         h.frames(2);
@@ -518,7 +518,7 @@ fn fully_constrained_center_rectangle_corners_can_be_picked_and_filleted() {
 #[test]
 fn ordinary_drawing_keeps_origin_snap_and_real_origin_corners_work() {
     let mut h = crate::scenario::Harness::new();
-    h.app.ui.show_origin = true;
+    h.app.set_origin_shown(true);
     h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
     h.step(&json!({"start":"sketch.line"})).unwrap();
     h.step(&json!({"move":{"world":[0,0,0]}})).unwrap();
@@ -708,4 +708,21 @@ fn centre_circle_clicked_through_a_line_end_stays_on_it() {
         "the circle stays on the line's end: {:?}",
         sk.constraints
     );
+}
+
+/// #4691: the Point tool clicked on a line's midpoint makes a point held there (a MidPoint
+/// constraint), not a free point that happens to sit on the middle.
+#[test]
+fn a_point_clicked_on_a_line_midpoint_is_held_there() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+    h.app.run("sketch.line", json!({"points":[[0,0],[20,0]],"ids":["base"]})).unwrap();
+    h.settle();
+    h.step(&json!({"start":"sketch.point"})).unwrap();
+    h.step(&json!({"click":{"world":[10, 0, 0]}})).unwrap();
+    let sid = h.app.session.active_sketch.unwrap();
+    let state = h.app.session.model.state();
+    let sk = &state.sketch(sid).unwrap().sketch;
+    let held = sk.constraints.iter().any(|c| matches!(c.kind, solidcraft_engine::sketch::ConstraintKind::Midpoint { .. }));
+    assert!(held, "no MidPoint constraint: {:?}", sk.constraints.iter().map(|c| &c.kind).collect::<Vec<_>>());
 }

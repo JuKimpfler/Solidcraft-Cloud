@@ -49,7 +49,7 @@ fn deleted_joint_ids_are_not_reused_after_reopening() {
 /// at y = 33, z = 4.
 fn leaf(s: &mut Session, name: &str) {
     run(s, "component.activate", json!({"component": "root"}));
-    run(s, "component.create", json!({"name": name}));
+    run(s, "component.create", json!({"name": name, "grounded": false}));
     run(s, "solid.box", json!({"length": 40, "width": 30, "height": 3, "corner": [0, 0, 0]}));
     run(s, "solid.cylinder", json!({"base": [0, 33, 4], "axis": [1, 0, 0], "radius": 4, "height": 40, "operation": "new"}));
 }
@@ -128,7 +128,7 @@ fn two_cubes() -> Session {
     let mut s = Session::default();
     for (name, x) in [("A", 0), ("B", 20)] {
         run(&mut s, "component.activate", json!({"component": "root"}));
-        run(&mut s, "component.create", json!({"name": name}));
+        run(&mut s, "component.create", json!({"name": name, "grounded": false}));
         run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "corner": [x, 0, 0]}));
     }
     let o = occ(&s, "A");
@@ -369,7 +369,7 @@ fn interference_box_sweep_matches_every_pair_check() {
 /// A small block in a new component: a part of a linkage, where only its joints matter.
 pub(super) fn part(s: &mut Session, name: &str, corner: [f64; 3]) {
     run(s, "component.activate", json!({"component": "root"}));
-    run(s, "component.create", json!({"name": name}));
+    run(s, "component.create", json!({"name": name, "grounded": false}));
     run(s, "solid.box", json!({"length": 2, "width": 2, "height": 2, "corner": corner}));
 }
 
@@ -977,6 +977,9 @@ fn a_part_at_a_dead_point_of_its_loop_keeps_its_mobility() {
     pin(&mut s, "revolute", "Root pin", "Ground", "Barrel", root, Vec3::Z);
     pin(&mut s, "slider", "Stroke", "Barrel", "Rod", root, Vec3::Y);
     pin(&mut s, "revolute", "Tip pin", "Rod", "Panel", tip, Vec3::Z);
+    super::solve_counts::take();
+    s.refresh();
+    assert_eq!(super::solve_counts::take().1, 0, "refresh must not repeat the singular-pose analysis");
     for part in ["Panel", "Barrel", "Rod"] {
         assert_eq!(dof_of(&mut s, part), 1, "dead point: {part}");
     }
@@ -1016,9 +1019,9 @@ fn joint(s: &Session, name: &str) -> u64 {
     s.doc.assembly.joints.iter().find(|j| j.name == name).map(|j| j.id).unwrap()
 }
 
-/// #1160: hiding a joint hides only its glyph. It is saved with the design (not an undo step,
-/// like other visibility), the hinge still drives its leaf while hidden, and the folder hides
-/// and shows every joint at once.
+/// #1160: hiding a joint hides only its glyph. It is saved with the design and is an undo step
+/// of its own (#2219, like other visibility), the hinge still drives its leaf while hidden, and
+/// the folder hides and shows every joint at once.
 #[test]
 fn hidden_joints_still_drive_and_are_saved_with_the_design() {
     let (dir, path) = temp_design("saved", "json");
@@ -1029,7 +1032,7 @@ fn hidden_joints_still_drive_and_are_saved_with_the_design() {
     let r = run(&mut s, "browser.visibility", json!({"joints": ["Hinge"], "visible": false}));
     assert_eq!(r["changed"], 1, "{r}");
     assert!(!s.joint_visible(hinge) && s.joint_visible(glue));
-    assert_eq!(s.undo.len(), undo, "hiding is not an undo step");
+    assert_eq!(s.undo.len(), undo + 1, "hiding is one undo step");
     assert!(s.is_dirty(), "hiding leaves unsaved changes");
     let l = run(&mut s, "joint.list", json!({}));
     assert_eq!(l["joints"].as_array().unwrap().iter().map(|j| j["visible"].clone()).collect::<Vec<_>>(), [json!(false), json!(true)]);
@@ -1375,6 +1378,194 @@ fn four_bar_coupler_point_traces_its_closed_form_curve() {
     let from_study = traced(&r);
     assert_eq!(from_study.len(), 73, "{r}");
     assert!(from_study.iter().zip(&pts).all(|(a, b)| near(*a, *b)), "{r}");
+}
+
+fn kept_trace_fit(s: &Session, id: u64) -> Vec<Vec3> {
+    s.doc.sketch(id).unwrap().wires.first().unwrap().fit.clone()
+}
+
+#[test]
+fn chebyshev_demo_regenerates_its_analytic_trajectory_without_resampling_playback() {
+    let mut s = Session::default();
+    s.run_script(&serde_json::from_str(include_str!("../../../../examples/chebyshev-motion-trace.json")).unwrap()).unwrap();
+    let trace = s.doc.assembly.traces.first().unwrap().clone();
+    let original = kept_trace_fit(&s, trace.sketch);
+    assert_eq!(original.len(), 145);
+    assert_eq!(s.doc.assembly.joints.len(), 4);
+    assert!(s.model.results.iter().all(|r| r.error.is_none()), "{:?}", s.model.results);
+    // Independent circle-intersection construction: P is the crank end, Q the
+    // coupler/rocker pin, and the tracer extends the coupler by another PQ.
+    let mut q = Vec3::new(40.0, 50.0, 0.0);
+    for (i, got) in original.iter().enumerate() {
+        let theta = (90.0 + 2.5 * i as f64).to_radians();
+        let p = Vec3::new(20.0 * theta.cos(), 20.0 * theta.sin(), 0.0);
+        let [a, b] = meet(p, 50.0, Vec3::new(40.0, 0.0, 0.0), 50.0);
+        q = if a.dist(q) < b.dist(q) { a } else { b };
+        let want = q * 2.0 - p + Vec3::Z * 10.0;
+        assert!(near(*got, want), "sample {i}: {got:?} wants {want:?}");
+    }
+    let count = s.motion_traces.recomputations;
+    for angle in [30, 90, 180, 270, 0] {
+        let result = run(&mut s, "joint.drive", json!({"joint":"Crank drive","value":angle,"quiet":true}));
+        assert!(result["stopped_by_loop"].is_null(), "{result}");
+    }
+    assert_eq!(s.motion_traces.recomputations, count);
+    assert_eq!(kept_trace_fit(&s, trace.sketch), original);
+
+    run(&mut s, "parameters.change", json!({"name":"coupler_length","expression":"55 mm"}));
+    let updated = kept_trace_fit(&s, trace.sketch);
+    let [q, _] = meet(Vec3::new(0.0, 20.0, 0.0), 55.0, Vec3::new(40.0, 0.0, 0.0), 50.0);
+    assert!(near(updated[0], q * 2.0 - Vec3::new(0.0, 20.0, 0.0) + Vec3::Z * 10.0));
+    assert_ne!(updated, original);
+    assert_eq!(s.doc.assembly.traces[0].wire, trace.wire);
+    assert_eq!(s.motion_traces.recomputations, count + 1, "a dimension edit resamples once");
+    assert!(s.model.result(trace.sketch).unwrap().warning.is_none());
+
+    run(&mut s, "parameters.change", json!({"changes":{"coupler_length":"2.5 * unit_length","unit_length":"24 mm"}}));
+    let scaled = kept_trace_fit(&s, trace.sketch);
+    assert!(scaled.iter().zip(&original).all(|(a, b)| near(*a, Vec3::new(b.x * 1.2, b.y * 1.2, 10.0))));
+    run(&mut s, "parameters.change", json!({"name":"trace_sweep","expression":"180 deg"}));
+    let half = kept_trace_fit(&s, trace.sketch);
+    assert!(near(half[0], scaled[0]) && near(*half.last().unwrap(), scaled[72]));
+    assert!(s.model.results.iter().all(|r| r.error.is_none()), "{:?}", s.model.results);
+}
+
+#[test]
+fn associative_trace_reuses_pose_and_unrelated_edits_but_follows_drive_expressions() {
+    let (mut s, p0, q0) = four_bar();
+    let mid = (p0 + q0) * 0.5;
+    run(&mut s, "parameters.add", json!({"name":"swing","expression":"90 deg"}));
+    let r = run(
+        &mut s,
+        "motion.trace.keep",
+        json!({"occurrence":"Coupler","point":[mid.x,mid.y,mid.z],
+        "joint":"Crank","from":0,"to":"swing","samples":19}),
+    );
+    let id = r["sketch"].as_u64().unwrap();
+    let original = kept_trace_fit(&s, id);
+    let count = s.motion_traces.recomputations;
+    for angle in [20, 45, 75, 10] {
+        run(&mut s, "joint.drive", json!({"joint":"Crank","value":angle,"quiet":true}));
+        assert_eq!(kept_trace_fit(&s, id), original);
+    }
+    run(&mut s, "parameters.add", json!({"name":"unrelated","expression":"123 mm"}));
+    run(&mut s, "parameters.change", json!({"name":"unrelated","expression":"456 mm"}));
+    assert_eq!(s.motion_traces.recomputations, count, "pose and unrelated edits must not resample");
+    let mut preview = s.scratch();
+    run(&mut preview, "joint.drive", json!({"joint":"Crank","value":80,"quiet":true}));
+    assert_eq!(preview.motion_traces.recomputations, count, "scratch previews reuse the same valid inputs");
+    run(&mut s, "parameters.change", json!({"name":"swing","expression":"180 deg"}));
+    let updated = kept_trace_fit(&s, id);
+    assert_ne!(updated, original);
+    assert_eq!(s.motion_traces.recomputations, count + 1, "a parameter command may refresh twice; sample once");
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(kept_trace_fit(&s, id), original);
+    run(&mut s, "edit.redo", json!({}));
+    assert_eq!(kept_trace_fit(&s, id), updated);
+    assert_eq!(s.motion_traces.recomputations, count + 1, "undo and redo reuse the retained input results");
+    run(&mut s, "parameters.rename", json!({"name":"swing","new_name":"travel"}));
+    assert_eq!(s.motion_traces.recomputations, count + 1, "renaming a parameter leaves resolved inputs unchanged");
+    let count = s.motion_traces.recomputations;
+    let before = s.doc.clone();
+    for invalid in [
+        json!({"sketch":id,"samples":501}),
+        json!({"sketch":id,"index":99}),
+        json!({"sketch":id,"from":"missing_parameter"}),
+        json!({"sketch":id,"joint":"Missing","from":0,"to":90}),
+    ] {
+        assert!(s.execute("motion.trace.edit", &invalid).is_err());
+        assert_eq!(*s.doc, *before, "invalid trace edits must be atomic");
+    }
+    run(&mut s, "motion.trace.edit", json!({"sketch":id,"samples":19}));
+    assert_eq!(s.motion_traces.recomputations, count, "an identical definition is reusable");
+    assert!(std::sync::Arc::ptr_eq(&before, &s.doc), "an identical edit must not refresh the model or add an undo step");
+    run(&mut s, "motion.trace.edit", json!({"sketch":id,"auto_update":false}));
+    run(&mut s, "parameters.change", json!({"name":"travel","expression":"270 deg"}));
+    assert_eq!(kept_trace_fit(&s, id), updated, "detaching preserves the curve");
+}
+
+#[test]
+fn associative_trace_follows_a_study_and_survives_serialization() {
+    let (mut s, p0, q0) = four_bar();
+    let mid = (p0 + q0) * 0.5;
+    let study = run(
+        &mut s,
+        "motion.study",
+        json!({"name":"Turn","steps":18,
+        "keys":[{"joint":"Crank","points":[[0,0],[18,90]]}]}),
+    );
+    let r = run(&mut s, "motion.trace.keep", json!({"occurrence":"Coupler","point":[mid.x,mid.y,mid.z],"study":"Turn"}));
+    let id = r["sketch"].as_u64().unwrap();
+    let original = kept_trace_fit(&s, id);
+    run(
+        &mut s,
+        "motion.study",
+        json!({"study":study["study"],"name":"Turn","steps":36,
+        "keys":[{"joint":"Crank","points":[[0,0],[36,180]]}]}),
+    );
+    assert_eq!(kept_trace_fit(&s, id).len(), 37);
+    assert_ne!(kept_trace_fit(&s, id), original);
+    let doc: solidcraft_doc::Document = serde_json::from_value(serde_json::to_value(&*s.doc).unwrap()).unwrap();
+    let mut opened = Session::new(doc);
+    run(&mut opened, "motion.trace.edit", json!({"sketch":id,"samples":25}));
+    assert_eq!(kept_trace_fit(&opened, id).len(), 25);
+    run(&mut opened, "motion.delete", json!({"study":"Turn"}));
+    assert!(run(&mut opened, "motion.list", json!({}))["traces"][0]["error"].is_string());
+    assert!(opened.model.result(id).unwrap().warning.as_ref().unwrap().contains("last successful"));
+    let count = opened.motion_traces.recomputations;
+    opened.refresh();
+    assert_eq!(opened.motion_traces.recomputations, count, "a missing dependency must not retry on every refresh");
+    run(&mut opened, "edit.undo", json!({}));
+    assert!(run(&mut opened, "motion.list", json!({}))["traces"][0]["error"].is_null());
+    assert!(opened.model.result(id).unwrap().warning.is_none());
+}
+
+#[test]
+fn associative_trace_follows_a_resized_picked_face_and_keeps_downstream_paths_current() {
+    let mut s = two_cubes();
+    pin(&mut s, "revolute", "Pivot", "A", "B", Vec3::new(20.0, 0.0, 0.0), Vec3::Z);
+    let r = run(
+        &mut s,
+        "motion.trace.keep",
+        json!({"occurrence":"B","point":[25,5,10],
+        "point_ref":{"occurrence":"B","face":[25,5,10]},"joint":"Pivot","from":0,"to":90,"samples":2}),
+    );
+    let id = r["sketch"].as_u64().unwrap();
+    let original = kept_trace_fit(&s, id);
+    run(&mut s, "component.activate", json!({"component":"root"}));
+    run(&mut s, "solid.pipe", json!({"path_sketch":id,"path":r["curves"],"diameter":1,"operation":"new","body_name":"TracePipe"}));
+    let pipe_before = s.model.state().body("TracePipe").unwrap().outline_bounds();
+    let comp = s.doc.find_component("B").unwrap();
+    let height =
+        s.doc.features.iter().find(|f| f.component == comp && matches!(f.kind, solidcraft_doc::FeatureKind::Box { .. })).unwrap().param_names[2]
+            .clone();
+    let count = s.motion_traces.recomputations;
+    run(&mut s, "parameters.change", json!({"name":height,"expression":"15 mm"}));
+    let updated = kept_trace_fit(&s, id);
+    assert!(updated.iter().all(|p| (p.z - 15.0).abs() < 1e-6));
+    assert_ne!(original, updated);
+    assert_eq!(s.motion_traces.recomputations, count + 1);
+    let model = s.model.state();
+    assert_eq!(model.sketch(id).unwrap().sketch.wires.first().unwrap().fit, updated);
+    let pipe_after = model.body("TracePipe").unwrap().outline_bounds();
+    assert!((pipe_after.min.z - pipe_before.min.z - 5.0).abs() < 1e-6);
+}
+
+#[test]
+fn associative_trace_ignores_another_mechanism_on_the_same_ground() {
+    let (mut s, p0, q0) = four_bar();
+    part(&mut s, "Other", [100.0, 0.0, -5.0]);
+    pin(&mut s, "revolute", "Other pivot", "Ground", "Other", Vec3::new(100.0, 0.0, 0.0), Vec3::Z);
+    let mid = (p0 + q0) * 0.5;
+    run(
+        &mut s,
+        "motion.trace.keep",
+        json!({"occurrence":"Coupler","point":[mid.x,mid.y,mid.z],
+        "joint":"Crank","from":0,"to":180,"samples":19}),
+    );
+    let count = s.motion_traces.recomputations;
+    run(&mut s, "joint.limits", json!({"joint":"Other pivot","min":-20,"max":30}));
+    assert_eq!(s.motion_traces.recomputations, count);
 }
 
 /// The middle of a slider-crank's rod: halfway between the crank pin on its circle and the wrist
@@ -1746,6 +1937,65 @@ fn joint_inspect_reports_a_lost_origin() {
     assert_eq!(hinge["a"]["resolves"], true);
 }
 
+/// An edge whose first face is a fillet's: the fillet face's name holds the edge it rounds
+/// (`F2:blend:<face>|<face>`), so the edge's two faces are the whole blend name and the slot's
+/// wall, not the blend name cut at its own `|`.
+#[test]
+fn joint_inspect_splits_an_edge_of_a_blend_face_into_its_two_faces() {
+    let mut s = Session::default();
+    run(&mut s, "component.create", json!({"name": "Base"}));
+    run(&mut s, "solid.box", json!({"length": 40, "width": 40, "height": 10, "corner": [0, 0, 0]}));
+    run(&mut s, "solid.fillet", json!({"edges": [[40, 20, 10]], "radius": 3}));
+    run(&mut s, "solid.box", json!({"length": 10, "width": 4, "height": 20, "corner": [32, 18, -5], "operation": "cut"}));
+    run(&mut s, "component.activate", json!({"component": "root"}));
+    run(&mut s, "component.create", json!({"name": "Cap"}));
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 5, "corner": [200, 0, 0]}));
+    // On the slot's wall y = 18, halfway round the fillet (axis x = 37, z = 7, r = 3).
+    let h = 3.0 * std::f64::consts::FRAC_1_SQRT_2;
+    run(
+        &mut s,
+        "joint.create",
+        json!({"type": "rigid", "name": "OnBlend", "a": {"occurrence": "Base", "edge": [37.0 + h, 18, 7.0 + h]},
+               "b": {"occurrence": "Cap", "face": [205, 5, 5]}}),
+    );
+    let j = run(&mut s, "joint.inspect", json!({"joint": "OnBlend"}))["joints"][0].clone();
+    let edge = reference(&j, "a", "edge");
+    let name = edge["name"].as_str().unwrap_or_default().to_string();
+    let faces: Vec<String> = edge["faces"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str().map(str::to_string)).collect();
+    // `F4:blend:F3:+x|F3:+z#[F3:-y,F5:-y]|F5:-y`: the blend piece beside the slot, and the slot's wall.
+    assert!(name.split_once(':').is_some_and(|(_, r)| r.starts_with("blend:")), "the blend face comes first: {name}");
+    assert_eq!(faces.len(), 2, "{edge}");
+    assert_eq!(format!("{}|{}", faces[0], faces[1]), name, "{edge}");
+    assert!(faces[0].contains(":blend:") && faces[0].contains('|'), "{edge}");
+    assert!(!faces[1].contains('|'), "{edge}");
+}
+
+/// A joint on a pattern's copy of a pin: the copy's wall (`F3:side:c1@F4.1`) still names the
+/// sketch curve it was swept from, `c1`.
+#[test]
+fn joint_inspect_finds_the_sketch_curve_of_a_copied_side() {
+    let mut s = Session::default();
+    run(&mut s, "component.create", json!({"name": "Pins"}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "PinSketch"}));
+    run(&mut s, "sketch.circle.center", json!({"center": [0, 0], "radius": 5, "id": "c1"}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance": 20, "name": "Pin"}));
+    run(&mut s, "solid.pattern.rectangular", json!({"features": ["Pin"], "dir1": [1, 0, 0], "count1": 2, "spacing1": 30}));
+    run(&mut s, "component.activate", json!({"component": "root"}));
+    run(&mut s, "component.create", json!({"name": "Cap"}));
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 5, "corner": [200, 0, 0]}));
+    run(
+        &mut s,
+        "joint.create",
+        json!({"type": "revolute", "name": "OnCopy", "a": {"occurrence": "Pins", "circle": [35, 0, 20]}, "b": {"occurrence": "Cap", "face": [205, 5, 5]}}),
+    );
+    let j = run(&mut s, "joint.inspect", json!({"joint": "OnCopy"}))["joints"][0].clone();
+    let wall = reference(&j, "a", "face");
+    assert!(wall["name"].as_str().is_some_and(|n| n.contains(":side:c1@F")), "a copy's wall: {j}");
+    assert_eq!((&wall["sketch"]["curve"], &wall["sketch"]["name"]), (&json!("c1"), &json!("PinSketch")), "{j}");
+    assert!(wall["sketch"]["error"].is_null(), "{j}");
+}
+
 /// `joint.inspect` reads only: no undo step, the design unchanged, and the id agents' gates
 /// treat as reading (`*.inspect`).
 #[test]
@@ -1759,4 +2009,108 @@ fn joint_inspect_reads_only() {
     run(&mut s, "joint.inspect", json!({"joint": "Fix"}));
     assert_eq!(run(&mut s, "document.inspect", json!({}))["undo"], undo);
     assert_eq!(serde_json::to_value(&s.doc).unwrap_or_default(), before);
+}
+
+/// Trial placements use exactly the same constraints as a full solve. Only the expensive DOF
+/// report is optional: loop stops, errors and the resulting pose must not depend on it.
+#[test]
+fn placement_analysis_preserves_held_loop_constraints_and_diagnostics() {
+    use solidcraft_doc::joints::{self, Analysis};
+    use std::collections::BTreeMap;
+
+    let (s, _, _) = four_bar();
+    let rocker = s.doc.assembly.joints.iter().find(|j| j.name == "Rocker").unwrap().id;
+    let held = BTreeMap::from([((rocker, 0), 0.0)]);
+    for angle in [-10.0_f64, 40.0, 100.0] {
+        let mut doc = (*s.doc).clone();
+        doc.assembly.joints.iter_mut().find(|j| j.id == rocker).unwrap().values[0] = angle.to_radians();
+        let full = joints::solve_holding(&doc, &s.model.state(), &held);
+        let placement = joints::solve_holding_with_analysis(&doc, &s.model.state(), &held, Analysis::Placement);
+        assert!(placement.dof.is_empty(), "trial placement must not compute DOF");
+        assert_eq!(placement.world, full.world);
+        assert_eq!(placement.values, full.values);
+        assert_eq!(placement.fixed, full.fixed);
+        assert_eq!(placement.conflicts, full.conflicts);
+        assert_eq!(placement.errors, full.errors);
+        let mut placed = doc.clone();
+        placed.apply_joint_solution(&placement);
+        let mut reference = doc;
+        reference.apply_joint_solution(&full);
+        assert_eq!(placed, reference);
+        assert_eq!(joints::solve(&placed, &s.model.state()).dof, joints::solve(&reference, &s.model.state()).dof);
+    }
+    // A degenerate origin remains an error even in a placement-only trial.
+    let mut broken = (*s.doc).clone();
+    broken.assembly.joints[0].b.snap = solidcraft_doc::joints::Snap::Point { point: Vec3::ZERO, z: Some(Vec3::ZERO), x: None };
+    let full = joints::solve(&broken, &s.model.state());
+    let placement = joints::solve_holding_with_analysis(&broken, &s.model.state(), &BTreeMap::new(), Analysis::Placement);
+    assert!(!full.errors.is_empty());
+    assert_eq!(placement.errors, full.errors);
+    assert_eq!(placement.conflicts, full.conflicts);
+}
+
+/// Ordinary commands publish one complete report; refresh only updates constraint placements.
+/// Counts are deterministic work assertions, not timing thresholds tied to a test machine.
+#[test]
+fn joint_drive_and_refresh_do_not_repeat_dof_analysis() {
+    let (mut s, _, _) = four_bar();
+    for (angle, quiet) in [(17, false), (58, true), (105, false)] {
+        super::solve_counts::take();
+        let r = run(&mut s, "joint.drive", json!({"joint":"Crank", "value":angle, "quiet":quiet}));
+        let (all, full) = super::solve_counts::take();
+        assert!(all > full, "placement trials must still run");
+        assert_eq!(full, usize::from(!quiet), "only a published DOF report needs full analysis");
+        let expected = super::sol_json(&solidcraft_doc::joints::solve(&s.doc, &s.model.state()), &json!({"quiet":quiet}));
+        for key in ["dof", "fixed", "errors", "conflicts"] {
+            assert_eq!(r.get(key), expected.get(key), "{key}: {r}");
+        }
+        let before = s.doc.clone();
+        s.refresh();
+        assert_eq!(super::solve_counts::take().1, 0, "refresh discards the DOF report");
+        assert_eq!(*s.doc, *before);
+    }
+}
+
+/// A parameter change solves the joints once: the refresh that follows the command finds the
+/// design and the model as the command's own solve left them (the sketch the parameter drives
+/// has its new solution stored after that solve). A move the joints undo is still solved.
+#[test]
+fn a_parameter_change_solves_the_joints_once() {
+    let mut s = Session::default();
+    run(&mut s, "parameters.change", json!({"name": "W", "expression": "300 mm"}));
+    run(&mut s, "component.create", json!({"name": "Plate"}));
+    run(&mut s, "solid.box", json!({"length": "W", "width": 100, "height": 1, "corner": [0, 0, 0]}));
+    run(&mut s, "solid.hole", json!({"position": ["W / 2", 50, 1], "diameter": 6}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "S"}));
+    let r = run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [40, 30]}));
+    let bottom = r["curves"][0].as_str().unwrap_or_default().to_string();
+    run(&mut s, "sketch.dimension", json!({"entities": [bottom], "value": "W / 10"}));
+    run(&mut s, "sketch.finish", json!({}));
+    let plate = occ(&s, "Plate");
+    run(&mut s, "occurrence.ground", json!({"occurrence": plate, "grounded": true}));
+    run(&mut s, "component.activate", json!({"component": "root"}));
+    run(&mut s, "component.create", json!({"name": "Bracket"}));
+    run(&mut s, "solid.box", json!({"length": 20, "width": 20, "height": 2, "corner": [100, 200, 0]}));
+    run(&mut s, "solid.hole", json!({"position": [110, 210, 2], "diameter": 6}));
+    let r = run(
+        &mut s,
+        "joint.create",
+        json!({"type": "rigid", "a": {"occurrence": "Plate", "circle": [153, 50, 0.8], "x": [1, 0, 0]},
+               "b": {"occurrence": "Bracket", "circle": [113, 210, 0.4], "x": [1, 0, 0]}}),
+    );
+    assert_eq!(r["errors"].as_array().map(Vec::len), Some(0), "{r}");
+    run(&mut s, "component.activate", json!({"component": "root"}));
+    for w in [400.0, 360.0] {
+        super::solve_counts::take();
+        run(&mut s, "parameters.change", json!({"name": "W", "expression": format!("{w} mm")}));
+        assert_eq!(super::solve_counts::take().0, 1, "W = {w}");
+        let at = place(&s, "Bracket", Vec3::new(110.0, 210.0, 0.0));
+        assert!(near(at, Vec3::new(w / 2.0, 50.0, 1.0)), "W = {w}: the bracket follows the hole, {at:?}");
+    }
+    // Moving the bracket changes no feature, so the model stays; the joint still takes it back.
+    let bracket = occ(&s, "Bracket");
+    super::solve_counts::take();
+    run(&mut s, "occurrence.move", json!({"occurrence": bracket, "translate": [5, 0, 0], "capture": true}));
+    assert!(super::solve_counts::take().0 > 0);
+    assert!(near(place(&s, "Bracket", Vec3::new(110.0, 210.0, 0.0)), Vec3::new(180.0, 50.0, 1.0)));
 }
