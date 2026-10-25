@@ -89,7 +89,7 @@ durchgehen. Getestet ist der Server selbst (siehe unten), nicht seine Einbindung
    RequestHeader unset X-Remote-User
    RewriteEngine On
    RewriteCond %{LA-U:REMOTE_USER} (.+)
-   RewriteRule .* - [E=PROXY_USER:%1,NS]
+   RewriteRule ^/api/(.*)$ http://127.0.0.1:8081/api/$1 [P,E=PROXY_USER:%1,NS]
    RequestHeader set X-Remote-User "%{PROXY_USER}e" env=PROXY_USER
 
    # Antworten des Datei-Servers nicht komprimieren: der ETag bleibt so, wie der Server ihn setzt.
@@ -97,7 +97,9 @@ durchgehen. Getestet ist der Server selbst (siehe unten), nicht seine Einbindung
 
    LimitRequestBody 268435456
    ProxyTimeout 300
-   ProxyPass        /api/ http://127.0.0.1:8081/api/
+   # /api/ geht über die RewriteRule oben ([P]), nicht über ProxyPass: Nur so kennt Apache den
+   # angemeldeten Benutzer schon, wenn der Header gesetzt wird (sonst antwortet der Server 401).
+   ProxyPassMatch   ^/api/ !
    ProxyPassReverse /api/ http://127.0.0.1:8081/api/
    ProxyPass        /     http://127.0.0.1:8080/
    ProxyPassReverse /     http://127.0.0.1:8080/

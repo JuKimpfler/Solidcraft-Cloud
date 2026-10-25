@@ -18,6 +18,7 @@
 #[cfg(not(target_os = "macos"))]
 #[path = "../../../assets/icons/app/shared/source/app_icon.rs"]
 mod app_icon;
+mod cloud;
 mod control_server;
 #[cfg(target_os = "windows")]
 mod native_crash;
@@ -70,6 +71,8 @@ fn mark(step: &str) {
 
 struct App {
     solve: SolveApp,
+    /// SolidCraft_Cloud: designs on the team's file server (src/cloud).
+    cloud: std::rc::Rc<cloud::Cloud>,
     /// The settings folder whose start marker the first frame clears (`startup::started`).
     starting: Option<std::path::PathBuf>,
     /// Frames begun; the second one means the first was drawn (startup is over).
@@ -120,6 +123,7 @@ impl eframe::App for App {
             self.solve.open_path_async(&f);
         }
         self.solve.logic(ctx);
+        self.cloud.tick(&mut self.solve);
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         if !self.solve.file_picker_busy() {
             self.space_mouse.tick(&mut self.solve, ctx);
@@ -136,6 +140,7 @@ impl eframe::App for App {
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.solve.ui(ui);
+        self.cloud.ui(&mut self.solve, ui.ctx());
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(solidcraft_ui_egui::prefs::STORAGE_KEY, self.solve.prefs());
@@ -147,6 +152,8 @@ impl eframe::App for App {
         solidcraft_ui_egui::save_job::tick(&mut self.solve, true);
         solidcraft_ui_egui::recovery_ui::close(&mut self.solve);
         solidcraft_engine::crash::end_session();
+        // SolidCraft_Cloud: the designs this app had open are free for the others again.
+        self.cloud.shutdown();
         // An update asked to restart into the new version or to run its installer.
         if let Some((program, args)) = solidcraft_ui_egui::update::take_launch(&mut self.solve) {
             let mut command = std::process::Command::new(&program);
@@ -166,12 +173,12 @@ impl eframe::App for App {
     }
 }
 
-fn services(cc: &eframe::CreationContext<'_>) -> Services {
+fn services(cc: &eframe::CreationContext<'_>) -> (Services, std::rc::Rc<cloud::Cloud>) {
     let parent = rfd::AsyncFileDialog::new().set_parent(cc);
     let open_parent = parent.clone();
     let program_parent = parent.clone();
     let file_parent = parent.clone();
-    Services {
+    let mut services = Services {
         pick_open: Some(Box::new(move |first: &[&str]| {
             // The file type the command reads comes first, so the picker opens on it (#1801).
             let mut dialog = open_parent.clone();
@@ -266,8 +273,6 @@ fn services(cc: &eframe::CreationContext<'_>) -> Services {
         restore_file: None,
         download_design: None,
         browser_files: None,
-        // SolidCraft_Cloud: only the browser build reaches the team's file server, so this app
-        // keeps the built-in samples on its start page.
         server_designs: None,
         agent_http: Some(std::sync::Arc::new(agent_http)),
         secrets: Some(std::sync::Arc::new(Keychain)),
@@ -288,7 +293,23 @@ fn services(cc: &eframe::CreationContext<'_>) -> Services {
             }
             let _ = command.spawn();
         })),
-    }
+    };
+    // SolidCraft_Cloud: Open and Save As of a design go to the team's file server once the user
+    // has signed in (File > Open); everything else keeps its own dialog.
+    let (Some(native_open), Some(native_save)) = (services.pick_open.take(), services.pick_save.take()) else {
+        return (
+            services,
+            cloud::Cloud::new(&cc.egui_ctx, None, std::rc::Rc::new(|_| Box::pin(async { None })), std::rc::Rc::new(|_, _| Box::pin(async { None }))),
+        );
+    };
+    let cloud = cloud::Cloud::new(&cc.egui_ctx, settings_dir().map(|d| d.join("cloud")), native_open.into(), native_save.into());
+    let (open, save, restorable, restorer, home) = (cloud.clone(), cloud.clone(), cloud.clone(), cloud.clone(), cloud.clone());
+    services.pick_open = Some(Box::new(move |first: &[&str]| open.pick_open(first)));
+    services.pick_save = Some(Box::new(move |name: &str, exts: &[&str]| save.pick_save(name, exts)));
+    services.can_restore = Some(Box::new(move |path: &str| restorable.can_restore(path)));
+    services.restore_file = Some(Box::new(move |path: &str| restorer.restore_file(path)));
+    services.server_designs = Some(Box::new(move || home.home_designs()));
+    (services, cloud)
 }
 
 /// HTTPS GET for the update check (docs/updates.md): certificates from the operating system, a
@@ -654,7 +675,8 @@ fn main() -> eframe::Result {
             solidcraft_ui_egui::fonts::setup_bundled_fonts(&cc.egui_ctx);
             solidcraft_ui_egui::fonts::load_system_fonts_in_background(&cc.egui_ctx);
             mark("fonts");
-            let mut app = SolveApp::new(Session::default(), services(cc));
+            let (services, cloud) = services(cc);
+            let mut app = SolveApp::new(Session::default(), services);
             app.apply_off_thread = Some(solidcraft_ui_egui::dialogs::APPLY_AT_ONCE);
             app.custom_titlebar = CUSTOM_TITLEBAR;
             // Windows: the OS hit test offers the resize border, at the window's DPI, from the
@@ -746,6 +768,7 @@ fn main() -> eframe::Result {
             solidcraft_engine::crash::phase("first frame");
             Ok(Box::new(App {
                 solve: app,
+                cloud,
                 starting,
                 frames: 0,
                 take_focus_unwanted: control_port.is_some(),
