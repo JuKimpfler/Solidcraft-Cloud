@@ -75,12 +75,23 @@ jobs:
           GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
         run: |
           git push --force origin "$BRANCH"
-          open=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')
+          open=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' || true)
           body="Automatischer Abgleich mit tangency-labs/solidcraft: $behind neue Upstream-Commits, ohne Konflikte."
           if [ -z "$open" ]; then
-            gh pr create --base main --head "$BRANCH" --title "Upstream abgleichen" --body "$body"
+            if ! gh pr create --base main --head "$BRANCH" --title "Upstream abgleichen" --body "$body"; then
+              echo "::warning::Pull Request konnte nicht automatisch erstellt werden (Token-Berechtigung). Branch '$BRANCH' wurde trotzdem aktualisiert."
+              {
+                echo "### Upstream-Abgleich: Pull Request konnte nicht automatisch erstellt werden"
+                echo
+                echo "Der Branch \`$BRANCH\` wurde aktualisiert, aber \`gh pr create\` wurde abgelehnt."
+                echo "Bitte die Repository-Einstellung \"Allow GitHub Actions to create and approve pull requests\" aktivieren"
+                echo "oder \`SYNC_TOKEN\` als Secret mit passenden Rechten hinterlegen."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
           else
-            gh pr comment "$open" --body "Neu aufgebaut: jetzt $behind Upstream-Commits vor main."
+            if ! gh pr comment "$open" --body "Neu aufgebaut: jetzt $behind Upstream-Commits vor main."; then
+              echo "::warning::Kommentar auf PR #$open konnte nicht geschrieben werden (Token-Berechtigung)."
+            fi
           fi
 
       - name: Report conflicts
