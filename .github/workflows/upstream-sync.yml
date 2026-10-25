@@ -1,7 +1,9 @@
 # SolidCraft_Cloud: hält den Fork auf dem Stand von tangency-labs/solidcraft (M5).
 #
 # Mehrmals täglich: Upstream holen, auf main mergen (Branch sync/upstream) und einen Pull Request
-# öffnen. Gibt es Konflikte, steht in einem Issue, welche Dateien betroffen sind.
+# öffnen. Die Workflow-Dateien (.github/workflows) bleiben dabei immer auf unserem Stand: Upstreams
+# Workflows laufen im Fork nicht, und so braucht der Push keine "workflow"-Berechtigung.
+# Echte Konflikte lassen den Lauf rot enden; die Dateien stehen in der Zusammenfassung des Laufs.
 # Ein bereits offener Sync-PR wird bei neuem Upstream-Stand neu aufgebaut (nur dieser Branch wird
 # überschrieben, nie main).
 #
@@ -18,7 +20,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  issues: write
 
 concurrency:
   group: upstream-sync
@@ -53,12 +54,19 @@ jobs:
           git config user.name "solidcraft-cloud-sync"
           git config user.email "actions@users.noreply.github.com"
           git checkout -B "$BRANCH" main
-          if git merge --no-ff -m "Upstream abgleichen (tangency-labs/solidcraft main)" upstream/main; then
-            echo "result=clean" >> "$GITHUB_OUTPUT"
-          else
-            git diff --name-only --diff-filter=U > conflicts.txt
+          git merge --no-commit --no-ff upstream/main || true
+          # Workflow-Dateien: immer unser Stand (auch bei Konflikten), Upstream-Neuzugänge entfernen.
+          git checkout main -- .github/workflows
+          for f in $(git ls-files .github/workflows); do
+            git cat-file -e "main:$f" 2>/dev/null || git rm -qf "$f"
+          done
+          git diff --name-only --diff-filter=U > conflicts.txt
+          if [ -s conflicts.txt ]; then
             git merge --abort
             echo "result=conflict" >> "$GITHUB_OUTPUT"
+          else
+            git commit -q -m "Upstream abgleichen (tangency-labs/solidcraft main)"
+            echo "result=clean" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Push branch and open or update the pull request
@@ -77,15 +85,13 @@ jobs:
 
       - name: Report conflicts
         if: env.behind != '0' && steps.merge.outputs.result == 'conflict'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          title="Upstream-Abgleich: Konflikte"
-          files=$(sed 's/^/- `/; s/$/`/' conflicts.txt)
-          body=$(printf 'Der Abgleich mit tangency-labs/solidcraft (%s Commits) hat Konflikte in:\n\n%s\n\nLokal lösen: `git fetch upstream && git checkout -b sync/manual origin/main && git merge upstream/main`, beide Seiten behalten, Pull Request öffnen.\n' "$behind" "$files")
-          existing=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
-          if [ -z "$existing" ]; then
-            gh issue create --title "$title" --body "$body"
-          else
-            gh issue comment "$existing" --body "$body"
-          fi
+          {
+            echo "### Upstream-Abgleich: Konflikte ($behind Commits)"
+            echo
+            sed 's/^/- `/; s/$/`/' conflicts.txt
+            echo
+            echo 'Lokal lösen: `git fetch upstream && git checkout -b sync/manual origin/main && git merge upstream/main`, beide Seiten behalten, Pull Request öffnen.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::Upstream-Abgleich hat Konflikte: $(tr '\n' ' ' < conflicts.txt)"
+          exit 1

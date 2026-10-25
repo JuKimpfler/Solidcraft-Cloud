@@ -45,7 +45,7 @@ unseren Dienst einhängt). Unser Code in der Web-Hülle steht in
 | M2 | Client-Anbindung (Öffnen/Speichern über den Server) | fertig, im Browser gegen den Datei-Server getestet; Einsatz auf dem Pi steht aus |
 | M3 | Sperren in der App | fertig, im Browser gegen den Datei-Server getestet; Einsatz auf dem Pi steht aus |
 | M4 | Startseite mit Server-Designs | fertig, im Browser gegen den Datei-Server getestet; Einsatz auf dem Pi steht aus |
-| M5 | Automatische Updates (Upstream-Abgleich) | Workflow `upstream-sync.yml` (alle 6 Stunden, Pull Request oder Issue bei Konflikten); erster Lauf steht aus |
+| M5 | Automatische Updates (Upstream-Abgleich) | Workflow `upstream-sync.yml` (alle 6 Stunden, Pull Request; bei Konflikten endet der Lauf rot) |
 | M6 | Desktop-App mit Server-Speicher, Sperren und Startseite (Windows/Linux/macOS) | fertig, unter Linux gegen Apache und Datei-Server getestet (zwei Benutzer: Speichern, Sperre, Kopie, Freigabe beim Beenden); Windows und Pi stehen aus |
 
 ## Desktop-App (M6)
@@ -78,7 +78,7 @@ Ihre Auslöser sind auf `workflow_dispatch` gekürzt, sonst ändert sich nichts 
 | `cloud-ci.yml` | Pull Request, Push auf `main` | Desktop-App und Web-Hülle bauen, Tests, Schichten, UI-Container |
 | `cloud-server.yml` | Änderungen in `cloud/server` | Datei-Server prüfen und für x86_64 und arm64 (Pi) bauen |
 | `cloud-windows.yml` | von Hand, Tag `cloud-v*` | Windows x64: `.msi`, portables `.zip`, `.exe` |
-| `upstream-sync.yml` | alle 6 Stunden | Upstream abgleichen (Pull Request oder Issue) |
+| `upstream-sync.yml` | alle 6 Stunden | Upstream abgleichen (Workflow-Dateien bleiben unsere) |
 
 Windows-Version bauen: *Actions → Cloud Windows → Run workflow*, danach unter *Artifacts*
 `solidcraft-windows-x64` herunterladen.
