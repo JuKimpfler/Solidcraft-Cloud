@@ -24,10 +24,9 @@ Unser Code liegt in **`cloud/`**, damit er sich nicht mit Upstream-Dateien über
 Änderungen an SolidCraft selbst sind bewusst klein und auf wenige Dateien beschränkt
 (`apps/solidcraft-web/src/`, `crates/ui-egui/src/home.rs`, ein Dienst in
 `crates/ui-egui/src/lib.rs`, eine Hilfsfunktion in
-`crates/ui-egui/src/documents.rs` und eine Zeile `server_designs: None` in
-`apps/solidcraft/src/main.rs`, weil das `Services`-Literal der Desktop-App alle Felder
-aufzählt). Unser Code in der Web-Hülle steht in
-`apps/solidcraft-web/src/server.rs`; in den Upstream-Dateien sind die Eingriffe mit
+`crates/ui-egui/src/documents.rs` und `apps/solidcraft/src/main.rs`, wo die Desktop-App
+unseren Dienst einhängt). Unser Code in der Web-Hülle steht in
+`apps/solidcraft-web/src/server.rs`, in der Desktop-App in `apps/solidcraft/src/cloud/`; in den Upstream-Dateien sind die Eingriffe mit
 „SolidCraft_Cloud“ kommentiert. Das README im Wurzelordner und
 `AGENTS.md` bleiben Upstream-Dateien und werden von uns nicht geändert.
 
@@ -47,6 +46,26 @@ aufzählt). Unser Code in der Web-Hülle steht in
 | M3 | Sperren in der App | fertig, im Browser gegen den Datei-Server getestet; Einsatz auf dem Pi steht aus |
 | M4 | Startseite mit Server-Designs | fertig, im Browser gegen den Datei-Server getestet; Einsatz auf dem Pi steht aus |
 | M5 | Automatische Updates (Upstream-Abgleich) | offen |
+| M6 | Desktop-App mit Server-Speicher, Sperren und Startseite (Windows/Linux/macOS) | fertig, unter Linux gegen Apache und Datei-Server getestet (zwei Benutzer: Speichern, Sperre, Kopie, Freigabe beim Beenden); Windows und Pi stehen aus |
+
+## Desktop-App (M6)
+
+Der Browser ist für größere Designs zu langsam (WebAssembly läuft in einem einzigen Thread). Die
+Desktop-App (`apps/solidcraft`) kann deshalb dasselbe: Unser Code liegt in
+`apps/solidcraft/src/cloud/`, eingehängt in `apps/solidcraft/src/main.rs`.
+
+- **Datei → Öffnen** fragt einmal nach Adresse, Benutzer und Passwort (Passwort im Schlüsselbund des
+  Computers) und zeigt dann die Designs auf dem Server mit Sperre („geöffnet von …").
+- **Speichern unter** legt ein neues Design auf dem Server an; **Speichern** lädt es hoch (mit
+  ETag, damit nichts überschrieben wird).
+- Ein geöffnetes Design ist für die anderen gesperrt (Heartbeat alle 20 s, die Sperre läuft nach 60 s
+  ohne Lebenszeichen ab, beim Beenden wird sie freigegeben). Ist es schon gesperrt, öffnet die App
+  eine **Kopie** mit Hinweis; „Sperre aufheben" gibt es als Notbremse.
+- Die Startseite zeigt die Server-Designs (noch ohne Vorschaubilder).
+- Die Dateien liegen als Zwischenspeicher im Einstellungsordner der App (`cloud/designs`,
+  `cloud/copies`).
+- Grenze: Ein Design aus der Liste „Zuletzt geöffnet" öffnet die Zwischenspeicher-Datei direkt, ohne
+  Sperre und ohne Aktualisierung. Der ETag schützt das Hochladen trotzdem.
 
 ## Web-Image (M0)
 
