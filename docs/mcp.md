@@ -135,6 +135,48 @@ not read-only, `destructiveHint` and `openWorldHint` are true.
 
 `solidcraft-cli` is on `PATH` after every package install: the Windows installer adds its folder, the deb, rpm and FreeBSD packages install it in `/usr/bin`, the Homebrew cask links it, the AppImage writes a small `solidcraft-cli` launcher into `~/.local/bin` on its first run, and the macOS app links it into `/opt/homebrew/bin` or `/usr/local/bin` when it starts (Help > Install solidcraft-cli command does it with an administrator prompt when those are not writable). Two packages keep it out of `PATH` by design: Snap exposes it as `solidcraft.cli`, and Flatpak runs it as `flatpak run --command=solidcraft-cli ai.storyteller.solidcraft`; use those as the client's `command` (with `mcp` as the arguments).
 
+The quickest way: **Help > Connect AI assistants…** in the app, or
+
+```sh
+solidcraft-cli mcp setup            # every client found on this computer
+solidcraft-cli mcp setup --dry-run  # show what it would write, change nothing
+solidcraft-cli mcp setup --client opencode --live
+```
+
+(`mcp install` is the same.) It adds a `solidcraft` server, using the full path of the
+`solidcraft-cli` that runs it, so nothing has to be on `PATH`. A client counts as installed when its
+configuration folder exists, and no client program is started. Supported:
+
+| `--client` | Configuration file |
+| --- | --- |
+| `opencode` | `~/.config/opencode/opencode.json` (or `.jsonc`) |
+| `claude-desktop` | `%APPDATA%\Claude\claude_desktop_config.json`, `~/Library/Application Support/Claude/`, `~/.config/Claude/`, and the Microsoft Store package's folder |
+| `claude-code` | `~/.claude.json` (user scope `mcpServers`) |
+| `cursor` | `~/.cursor/mcp.json` |
+| `codex` | `$CODEX_HOME` or `~/.codex`, `config.toml` (CLI, IDE extension and desktop app) |
+| `gemini` | `~/.gemini/settings.json` |
+| `copilot` | `~/.copilot/mcp-config.json` (GitHub Copilot CLI) |
+| `windsurf` | `~/.codeium/windsurf/mcp_config.json` |
+| `zed` | Zed's `settings.json` (`context_servers`) |
+| `vscode` | VS Code's user `mcp.json` |
+
+The files are edited in place: only the `solidcraft` entries change, everything else in the file
+(other servers, comments, order) stays as it was, and the file is copied to `<name>.bak` first. A
+file that does not parse is left alone. Running it again after an update moves the program only
+refreshes the path of an entry it wrote; an entry you changed (extra arguments, another program)
+is left as you have it. `--live` also adds `solidcraft-live`, which bridges to the open app (port
+7878, see below). Restart the client afterwards.
+
+To configure a client by hand instead, these are the entries. OpenCode (`opencode.json`):
+
+```json
+{
+  "mcp": {
+    "solidcraft": { "type": "local", "command": ["/path/to/solidcraft-cli", "mcp"], "enabled": true }
+  }
+}
+```
+
 Claude Code (project `.mcp.json`, or `claude mcp add solidcraft -- solidcraft-cli mcp`; a setup
 added under the previous name keeps working, see the [compatibility notes](https://github.com/bherbruck/solidcraft/blob/main/docs/compatibility.md#mcp)):
 

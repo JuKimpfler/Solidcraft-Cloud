@@ -1034,6 +1034,37 @@ impl Clone for KeptSlot {
 }
 
 impl SolvedSketch {
+    /// The curves `ids` in order along the open chain they make, from one free end to the other,
+    /// whatever order they were given in. Refused unless they join end to end into one open chain.
+    pub fn chain_order(&self, ids: &[String]) -> Result<Vec<String>> {
+        let tol = 1e-5;
+        let mut ends = Vec::with_capacity(ids.len());
+        for id in ids {
+            let ci = self.sketch.curve_index(id).ok_or_else(|| DocError::Unknown(format!("curve `{id}`")))?;
+            let segs = self.sketch.segs(ci);
+            let (Some(first), Some(last)) = (segs.first(), segs.last()) else { return Err(DocError::Invalid(format!("curve `{id}` has no length"))) };
+            ends.push((id.clone(), first.start(), last.end()));
+        }
+        let joined = |p: Vec2, skip: usize| ends.iter().enumerate().any(|(k, e)| k != skip && (e.1.dist(p) < tol || e.2.dist(p) < tol));
+        // Start at a curve with a free end, walking away from it.
+        let Some((start, at)) = ends.iter().enumerate().find_map(|(k, e)| match (joined(e.1, k), joined(e.2, k)) {
+            (false, _) => Some((k, e.2)),
+            (_, false) => Some((k, e.1)),
+            _ => None,
+        }) else {
+            return Err(DocError::Invalid("the curves close into a loop: an open chain is needed".into()));
+        };
+        let (mut order, mut at) = (vec![start], at);
+        while order.len() < ends.len() {
+            let Some((k, e)) = ends.iter().enumerate().find(|(k, e)| !order.contains(k) && (e.1.dist(at) < tol || e.2.dist(at) < tol)) else {
+                return Err(DocError::Invalid("the curves are not joined end to end into one chain".into()));
+            };
+            at = if e.1.dist(at) < tol { e.2 } else { e.1 };
+            order.push(k);
+        }
+        Ok(order.iter().filter_map(|k| ends.get(*k).map(|e| e.0.clone())).collect())
+    }
+
     /// Rough heap footprint (see [`ModelState::retained_bytes`]).
     pub fn retained_bytes(&self) -> usize {
         let entities = self.sketch.points.len() + self.sketch.curves.len() + self.sketch.constraints.len() + self.sketch.links.len();
@@ -1060,7 +1091,10 @@ impl ModelState {
     /// each keeps its own mesh, so the meshes are those `ModelBody::mesh` makes one by one).
     /// Stops starting bodies once `go_on` says no.
     pub fn warm_meshes(&self, go_on: impl Fn() -> bool + Sync) {
-        kernel::for_each_on_threads(&self.bodies, 16, |b| {
+        // Only bodies without a mesh: starting threads just to find every mesh made costs more
+        // than looking (most bodies are unchanged from one command to the next).
+        let cold: Vec<_> = self.bodies.iter().filter(|b| b.mesh.get().is_none()).collect();
+        kernel::for_each_on_threads(&cold, 16, |b| {
             if go_on() {
                 let _ = b.mesh();
             }
@@ -1069,7 +1103,10 @@ impl ModelState {
     /// [`ModelState::warm_meshes`], and every body's display plan at the current display quality
     /// (what a GPU viewport draws).
     pub fn warm_display(&self) {
-        kernel::for_each_on_threads(&self.bodies, 16, |b| {
+        let q = crate::display_quality::current();
+        let planned = |b: &ModelBody| b.plan.get(q.index()).is_none_or(|cell| cell.get().is_some());
+        let cold: Vec<_> = self.bodies.iter().filter(|b| b.mesh.get().is_none() || !planned(b)).collect();
+        kernel::for_each_on_threads(&cold, 16, |b| {
             let _ = b.mesh();
             let _ = b.display_plan();
         });
@@ -6652,6 +6689,7 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
         | FeatureKind::SheetHem { .. }
         | FeatureKind::SheetPerforate { .. }
         | FeatureKind::SheetFold { .. }
+        | FeatureKind::SheetPath { .. }
         | FeatureKind::SheetUnfold { .. }
         | FeatureKind::SheetConvert { .. } => more::sheet_eval(doc, vals, f, st, warning),
         FeatureKind::Boss { .. } | FeatureKind::Lip { .. } | FeatureKind::SnapFit { .. } | FeatureKind::Rest { .. } => {
@@ -7793,25 +7831,30 @@ impl PlacedBodies {
 
     /// The body `b` placed by `m`, from an earlier call when `b` is the same body as then.
     fn placed(&self, b: &ModelBody, m: &crate::Mat, name: String) -> ModelBody {
-        match self.reused(b, m) {
-            Some(placed) => {
-                let mut fresh = ModelBody::new(name, placed.body.clone(), b.feature);
-                fresh.mesh = placed.mesh.clone();
-                fresh.measured = placed.measured.clone();
-                fresh.mesh_placement = placed.mesh_placement.clone();
-                fresh.plan = placed.plan.clone();
-                fresh.plan_mesh = placed.plan_mesh.clone();
+        if let Some(placed) = self.taken(b, m, &name) {
+            return placed;
+        }
+        match kernel::place_matrix(&b.body, *m) {
+            Ok(body) => {
+                let mut fresh = ModelBody::new(name, body, b.feature);
+                fresh.mesh_placement = placed_mesh::PlacedMesh::new(b, m).map(Arc::new);
                 fresh
             }
-            None => match kernel::place_matrix(&b.body, *m) {
-                Ok(body) => {
-                    let mut fresh = ModelBody::new(name, body, b.feature);
-                    fresh.mesh_placement = placed_mesh::PlacedMesh::new(b, m).map(Arc::new);
-                    fresh
-                }
-                Err(_) => ModelBody::new(name, b.body.clone(), b.feature),
-            },
+            Err(_) => ModelBody::new(name, b.body.clone(), b.feature),
         }
+    }
+
+    /// The body `b` placed by `m` as an earlier call placed it, when `b` is the same body as then.
+    fn taken(&self, b: &ModelBody, m: &crate::Mat, name: &str) -> Option<ModelBody> {
+        self.reused(b, m).map(|placed| {
+            let mut fresh = ModelBody::new(name.to_string(), placed.body.clone(), b.feature);
+            fresh.mesh = placed.mesh.clone();
+            fresh.measured = placed.measured.clone();
+            fresh.mesh_placement = placed.mesh_placement.clone();
+            fresh.plan = placed.plan.clone();
+            fresh.plan_mesh = placed.plan_mesh.clone();
+            fresh
+        })
     }
 }
 
@@ -7921,7 +7964,12 @@ pub fn world_state_reusing(doc: &Document, st: &ModelState, placed_before: &mut 
             }
         }
     }
-    let mut moved = kernel::map_on_threads(&jobs, 16, |(b, bm, name)| placed_before.placed(b, bm, name.clone())).into_iter().zip(&jobs);
+    // Bodies placed as before are taken here: starting threads only to copy them cost every
+    // command in a design with placed components more than the copies.
+    let reused: Vec<_> = jobs.iter().map(|(b, bm, name)| placed_before.taken(b, bm, name)).collect();
+    let fresh: Vec<_> = jobs.iter().zip(&reused).filter(|(_, r)| r.is_none()).map(|(job, _)| job).collect();
+    let mut placed_fresh = kernel::map_on_threads(&fresh, 16, |(b, bm, name)| placed_before.placed(b, bm, name.clone())).into_iter();
+    let mut moved = reused.into_iter().map(|r| r.or_else(|| placed_fresh.next().flatten())).zip(&jobs);
     for (comp, path, m) in placements {
         let primary = path == first_path(comp);
         let ident = crate::is_identity(&m);
