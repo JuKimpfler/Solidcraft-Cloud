@@ -644,7 +644,7 @@ impl SectionIndex {
 /// ones used by a feature unless shown on their own, retain their stored visibility.
 pub fn sketch_shown(s: &Session, id: u64) -> bool {
     let v = &s.visibility;
-    if s.active_sketch == Some(id) {
+    if s.active_sketch == Some(id) || s.feature_edit_sketch == Some(id) {
         return true;
     }
     if !sketch_component_visible(s, id) || s.feature_folder_hidden(id, "sketches") {

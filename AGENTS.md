@@ -218,3 +218,5 @@ workflow; never regenerate them in a PR.
 Keep them conflict-free (CONTRIBUTING.md, "Lists many changes add to"): message catalogs sorted
 (`cargo xtask lists --fix`), `mod` lines in their sorted group, the language list English first
 then by id, generated files left to `main`, and a design-format change as one new file.
+New UI strings go in a new `assets/locales/pending/<slug>.json` and new ATTRIBUTION.md rows in a new
+`attribution/pending/<slug>.md`, never into the catalogs or the table (see the README in each folder).

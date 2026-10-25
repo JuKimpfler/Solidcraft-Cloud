@@ -152,11 +152,11 @@ fn right_click_on_a_selected_face_keeps_the_multi_selection() {
     )
     .unwrap();
     app.viewport.hover = Some(Hit::Face { body: b.clone(), index: 0, point: Vec3::new(9.0, 9.0, 9.0) });
-    context_menu::open(&mut app, pos2(400.0, 300.0));
+    context_menu::open(&mut app, pos2(400.0, 300.0), Default::default());
     assert_eq!(app.session.selection.len(), 2, "the right-click keeps the faces it is about: {:?}", app.session.selection);
     // A face outside the selection is still picked, so its menu is about the face under the cursor.
     app.viewport.hover = Some(Hit::Face { body: b, index: 2, point: Vec3::new(9.0, 9.0, 9.0) });
-    context_menu::open(&mut app, pos2(400.0, 300.0));
+    context_menu::open(&mut app, pos2(400.0, 300.0), Default::default());
     assert_eq!(app.session.selection.len(), 1, "a face outside the selection is picked: {:?}", app.session.selection);
 }
 

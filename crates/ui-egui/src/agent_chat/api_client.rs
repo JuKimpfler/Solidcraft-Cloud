@@ -20,8 +20,6 @@ use super::agents::Protocol;
 use super::backend::{ChatBackend, Event, HttpFn, HttpRequest, PromptPart, StartContext, ToolStatus};
 use super::process::{AgentProcess, FromAgent, ProcessHandle};
 
-/// Model requests for one message, at most (each answer with tool calls is one).
-pub const MAX_REQUESTS_PER_TURN: usize = 24;
 /// Longest tool result handed back to the model.
 const MAX_TOOL_TEXT: usize = 20_000;
 /// Messages kept in the conversation (the system note stays).
@@ -276,7 +274,8 @@ impl Worker {
     fn turn(&mut self, parts: Vec<PromptPart>) {
         self.history.push(user_message(self.cfg.protocol, &parts));
         self.trim_history();
-        for _ in 0..MAX_REQUESTS_PER_TURN {
+        // No cap on requests: Stop sets `cancel`, checked at the top of every round.
+        loop {
             // The history as of here is complete (every tool call answered): a cancelled request
             // goes back to it, so no half-finished round is left to confuse the next message.
             let sound = self.history.len();
@@ -356,8 +355,6 @@ impl Worker {
                 self.history.push(json!({"role": "user", "content": results}));
             }
         }
-        self.emit(Event::Text { thought: false, text: format!("\n({})", crate::i18n::tr("ui.ai_request_limit")) });
-        self.emit(Event::TurnEnded { reason: "max_turn_requests".into() });
     }
 
     /// Keep the conversation bounded and starting at a user message, so neither protocol sees a

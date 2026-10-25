@@ -2131,6 +2131,51 @@ fn midplane_asks_for_two_planes_then_builds_the_one_between_them() {
     assert!((pl.origin.z - 10.0).abs() < 1e-6, "{pl:?}");
 }
 
+/// Offset Plane through a point: a vertex picked as well as the plane puts the plane through
+/// it, the distance row goes away, and editing the plane shows both picks again.
+#[test]
+fn offset_plane_through_a_picked_vertex() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.run("solid.box", json!({"length":40,"width":30,"height":20,"body_name":"Box"})).unwrap();
+    h.app.start("construct.plane.offset");
+    h.frames(1);
+    let d = h.app.dialog.as_mut().unwrap();
+    assert_eq!(d.inputs.len(), 2);
+    d.inputs[0].items = vec![Sel::Plane { name: "XY".into() }];
+    d.inputs[1].items = vec![Sel::Vertex { body: "Box".into(), point: Vec3::new(40.0, 30.0, 20.0) }];
+    assert!(d.primary().is_none(), "no distance to type or drag");
+    let commands = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
+    assert_eq!(commands.first().map(|c| c.1.clone()), Some(json!({"base":"XY","through":{"vertex":[40.0,30.0,20.0]},"offset":null})));
+    h.step(&json!({"key":"Enter"})).unwrap();
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog.as_ref().and_then(|d| d.error.clone()));
+    let (id, _, pl) = solidcraft_engine::view::construction_planes(&h.app.session).into_iter().next().expect("the plane");
+    assert!(pl.normal().cross(Vec3::Z).len() < 1e-6 && (pl.origin.z - 20.0).abs() < 1e-6, "{pl:?}");
+    let reopened = crate::dialogs::for_feature(&h.app, id, None).unwrap();
+    assert_eq!(reopened.inputs[0].items, vec![Sel::Plane { name: "XY".into() }]);
+    assert!(matches!(reopened.inputs[1].items.as_slice(), [Sel::Vertex { body, .. }] if body == "Box"), "{:?}", reopened.inputs[1].items);
+}
+
+/// Plane at Angle draws the tilted plane while its dialog is open, when created and when edited,
+/// and redraws it when the angle changes (it used to show only the picked plane and the label).
+#[test]
+fn plane_at_angle_previews_the_tilted_plane_when_edited() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.home.open = false;
+    let id = h.app.run("construct.plane.at_angle", json!({"base":"XY","axis":"Y","angle":"45 deg"})).unwrap()["feature"].as_u64().unwrap();
+    h.app.edit_feature(id);
+    h.frames(2);
+    let d = h.app.dialog.as_ref().unwrap();
+    assert!(matches!(d.kind, Kind::AnglePlane { .. }) && d.editing.is_some(), "{d:?}");
+    assert!(d.previews(), "the edited plane is previewed");
+    wait_feature_preview(&mut h);
+    let first = h.app.preview.key;
+    if let Kind::AnglePlane { angle } = &mut h.app.dialog.as_mut().unwrap().kind {
+        *angle = "30 deg".into();
+    }
+    wait_feature_preview(&mut h);
+    assert_ne!(h.app.preview.key, first, "a new angle redraws the preview");
+}
+
 /// #2474, #2494: every construct tool asks for what it needs. Started from the toolbar with
 /// nothing selected, none of them runs its command and reports that `a` (or `face`, `edge`…)
 /// is required; a construct command added later without a dialog fails here too.
@@ -2390,4 +2435,28 @@ fn model_bounds_are_kept_until_the_model_changes() {
     }
     let far = crate::viewport::model_bounds(&app);
     assert!((far.max.x - 505.0).abs() < 1e-6, "a new sketch grows the box: {far:?}");
+}
+
+/// #2747: the Revolve window takes a planar body face as its profile, as the engine already
+/// does: the box's front face (on Y = 0, from the Z axis to X = 40) turned about Z is a
+/// Ø80 × 20 cylinder.
+#[test]
+fn face_then_revolve_turns_the_face() {
+    let mut app = boxed();
+    let front = face(&app, Vec3::new(20.0, 0.0, 10.0));
+    let mut d = start(&mut app, vec![front], "solid.revolve");
+    assert_eq!(d.inputs[0].items.len(), 1, "the face is the profile");
+    d.inputs[1].items = vec![Sel::Axis { name: "Z".into() }];
+    let cmds = apply_commands(&app, &d).unwrap();
+    assert_eq!(cmds[0].1["face"], json!([20.0, 0.0, 10.0]), "{:?}", cmds[0].1);
+    assert_eq!(cmds[0].1["face_body"], "Body1");
+    assert!(cmds[0].1.get("sketch").is_none(), "{:?}", cmds[0].1);
+    for (cmd, p) in cmds {
+        app.run(&cmd, p).unwrap();
+    }
+    let st = app.session.world_state();
+    let made = st.bodies.iter().find(|b| b.name != "Body1").expect("the revolve makes a new body");
+    let v = solidcraft_engine::doc::kernel::measure(&made.body).unwrap().volume;
+    let want = std::f64::consts::PI * 40.0 * 40.0 * 20.0;
+    assert!((v - want).abs() < want * 1e-3, "{v} vs {want}");
 }

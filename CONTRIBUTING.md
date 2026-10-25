@@ -280,6 +280,9 @@ and a fresh CI run:
   after each merge by the Generated files workflow (`cargo xtask licences`, `cargo xtask
   features`). Don't regenerate or edit them in a pull request.
 - **Design format**: one file per change, never an edit to a shared number (above).
+- **New UI strings and attribution rows**: one new file per change, `assets/locales/pending/<slug>.json`
+  and `attribution/pending/<slug>.md`, instead of editing the catalogs or the ATTRIBUTION.md table;
+  `cargo xtask fold-pending` folds them on `main` (see the README in each folder).
 
 ## Sending a change
 

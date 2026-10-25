@@ -222,6 +222,12 @@ pub struct MenuState {
     pub over_geometry: bool,
     /// The plane under the cursor when the viewport menu opened: it offers a sketch on it.
     pub plane: Option<String>,
+    /// Where the viewport menu opened and the keys held at that click (Select Other adds with
+    /// them).
+    opened: Option<(Pos2, crate::tool_modifiers::Held)>,
+    /// The viewport menu's right-click selected what was under it: where the menu opened, the
+    /// selection before and the one it made. Select Other puts the one before back.
+    picked: Option<(Pos2, Vec<Sel>, Vec<Sel>)>,
     /// The button that opened the menu, when it toggles it: a press there is not a press outside,
     /// so its click closes the menu instead of closing and reopening it (#1522).
     opener: Option<Rect>,
@@ -1057,7 +1063,15 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
             app.repeat_last();
         }
         "ui.selectOther" => {
-            crate::select_other::open(app, at);
+            // The list picks instead of the right-click.
+            if let Some((opened, before, made)) = app.menu.picked.take()
+                && opened == at
+                && app.session.selection == made
+            {
+                let _ = app.run("select.set", json!({ "items": before }));
+            }
+            let held = app.menu.opened.filter(|(opened, _)| *opened == at).map(|(_, held)| held).unwrap_or_default();
+            crate::select_other::open(app, at, held);
         }
         "ui.delete" if item.params.is_some() => crate::delete::request(app, p),
         "ui.delete" => delete(app),
@@ -1555,8 +1569,11 @@ fn context_target_selected(selection: &[Sel], target: &Sel) -> bool {
 
 /// Open the viewport menu at a screen position. A right-click on something not selected
 /// selects it first, so the menu is about what is under the cursor; a face or edge already in a
-/// multi-selection keeps the whole selection (#3733).
-pub fn open(app: &mut SolveApp, at: Pos2) {
+/// multi-selection keeps the whole selection (#3733). `held`: the keys held at that click.
+pub fn open(app: &mut SolveApp, at: Pos2, held: crate::tool_modifiers::Held) {
+    app.menu.opened = Some((at, held));
+    app.menu.picked = None;
+    let before = app.session.selection.clone();
     app.menu.over_geometry = app.viewport.hover.is_some();
     // A right-click leaves a plane unselected, but the menu offers a sketch on it.
     app.menu.plane = app.viewport.hover.clone().and_then(|h| crate::viewport::candidate(app, &[h])).and_then(|(_, sel)| match sel {
@@ -1572,6 +1589,7 @@ pub fn open(app: &mut SolveApp, at: Pos2) {
         && !matches!(sel, Sel::Plane { .. } | Sel::Axis { .. })
     {
         let _ = app.run("select.set", json!({ "items": [sel] }));
+        app.menu.picked = Some((at, before, app.session.selection.clone()));
     } else if app.session.active_sketch.is_some()
         && let Some(h) = app.viewport.hover.clone()
         && let Some((_, sel)) = crate::viewport::candidate(app, &[h])
@@ -1580,6 +1598,7 @@ pub fn open(app: &mut SolveApp, at: Pos2) {
         && !context_target_selected(&app.session.selection, &sel)
     {
         let _ = app.run("select.set", json!({ "items": [sel] }));
+        app.menu.picked = Some((at, before, app.session.selection.clone()));
     }
     open_for(app, at, Target::Viewport);
 }
@@ -1764,7 +1783,7 @@ fn track_hold(app: &mut SolveApp, ctx: &egui::Context) {
             app.menu.press = None;
         } else if time - t0 > 0.35 {
             app.menu.press = None;
-            open(app, p0);
+            open(app, p0, crate::tool_modifiers::Held::from_modifiers(ctx.input(|i| i.modifiers)));
             app.menu.flick = true;
         } else {
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
@@ -1792,7 +1811,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         && app.synthetic.is_empty()
     {
         app.menu.pending = None;
-        if target == Target::Viewport { open(app, at) } else { open_for(app, at, target) }
+        if target == Target::Viewport { open(app, at, crate::tool_modifiers::Held::default()) } else { open_for(app, at, target) }
     }
     crate::browser::dims_overlay(app, ctx);
     track_hold(app, ctx);
@@ -2074,6 +2093,52 @@ mod tests {
         assert!(!items(&h.app, &Target::Viewport).iter().any(|i| i.id == "sketch.toggle_driven"), "a horizontal constraint is not a dimension");
         h.app.session.selection = vec![Sel::SketchCurve { id: l }];
         assert!(!items(&h.app, &Target::Viewport).iter().any(|i| i.id == "sketch.toggle_driven"));
+    }
+
+    #[test]
+    fn units_toolbar_start_offers_choices_and_one_undo_step() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        h.call("ui.start", json!({"command":"document.units"}));
+        assert!(!h.app.status.as_ref().is_some_and(|(_, _, error)| *error));
+        assert_eq!(h.app.menu.target, Target::Units);
+        assert!(h.app.viewport.context_menu.is_some());
+        let menu = describe(&h.app);
+        let choices = menu["items"].as_array().unwrap();
+        assert_eq!(choices.iter().map(|item| item["label"].as_str().unwrap()).collect::<Vec<_>>(), crate::prefs::UNITS);
+        assert!(choices.iter().all(|item| item["enabled"] == true));
+        assert!(h.app.session.undo.is_empty());
+        h.call("ui.menuPick", json!({"item":"in"}));
+        assert_eq!(h.app.session.doc.units, "in");
+        assert!(h.app.viewport.context_menu.is_none());
+        assert_eq!(h.app.session.undo.len(), 1);
+        h.app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(h.app.session.doc.units, "mm");
+        h.app.run("edit.redo", json!({})).unwrap();
+        assert_eq!(h.app.session.doc.units, "in");
+    }
+
+    #[test]
+    fn units_toolbar_menu_is_anchored_and_programmatic_calls_stay_headless() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        let missing = h.call("engine.execute", json!({"command":"document.units","params":{}}));
+        assert_eq!(missing["ok"], false);
+        assert!(h.app.viewport.context_menu.is_none());
+        let changed = h.call("engine.execute", json!({"command":"document.units","params":{"units":"cm"}}));
+        assert_eq!(changed["ok"], true);
+        assert_eq!(h.app.session.doc.units, "cm");
+        assert!(h.app.viewport.context_menu.is_none());
+        h.app.status = None;
+        h.step(&json!({"click":{"handle":"tab:MANAGE"}})).unwrap();
+        let button = crate::scenario::rect_of("button:document.units").unwrap();
+        h.step(&json!({"click":{"handle":"button:document.units"}})).unwrap();
+        assert_eq!(h.app.viewport.context_menu, Some(button.left_bottom()));
+        assert_eq!(h.app.menu.target, Target::Units);
+        assert!(!h.app.status.as_ref().is_some_and(|(_, _, error)| *error));
+        assert_eq!(items(&h.app, &Target::Units).iter().find(|item| item.label == "cm").unwrap().shortcut, "current");
+        h.step(&json!({"click":{"handle":"button:document.units"}})).unwrap();
+        assert!(h.app.viewport.context_menu.is_none());
     }
 
     #[test]
