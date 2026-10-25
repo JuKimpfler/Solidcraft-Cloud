@@ -48,9 +48,9 @@ pub enum GeoRef {
     /// World X, Y or Z axis.
     World { axis: String },
     /// A construction axis feature, by name.
-    Axis { name: String },
+    Axis { name: crate::FeatureName },
     /// A construction point feature, by name.
-    ConstructPoint { name: String },
+    ConstructPoint { name: crate::FeatureName },
     /// A sketch point (by sketch feature id and point id).
     SketchPoint { sketch: u64, point: String },
     /// A sketch curve (by sketch feature id and curve id).
@@ -97,6 +97,18 @@ pub enum ConstructGeom {
     Plane(Plane),
     Axis { origin: Vec3, dir: Vec3 },
     Point(Vec3),
+}
+
+impl ConstructGeom {
+    /// The geometry moved by `m` (where its component is placed).
+    pub fn placed(&self, m: &crate::Mat) -> ConstructGeom {
+        let (point, vector) = (|p: Vec3| crate::apply_point(m, p), |v: Vec3| crate::apply_vector(m, v));
+        match self {
+            ConstructGeom::Plane(p) => Plane::new(point(p.origin), vector(p.x), vector(p.y)).map_or_else(|| self.clone(), ConstructGeom::Plane),
+            ConstructGeom::Axis { origin, dir } => ConstructGeom::Axis { origin: point(*origin), dir: vector(*dir) },
+            ConstructGeom::Point(p) => ConstructGeom::Point(point(*p)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -243,8 +243,10 @@ fn finish_exit_label_and_its_button_are_centred() {
     h.app.run("sketch.create", json!({"plane":"xy"})).unwrap();
     h.frames(2);
     let label = scenario::handles("panel:SKETCH:FINISH SKETCH")[0].1;
-    let button = scenario::handles("button:sketch.finish")[0].1;
-    assert!((label.x - button.x).abs() < 1.0, "the only button sits centred over its label: {label:?} {button:?}");
+    // Finish and Cancel Sketch (#3838) sit side by side, the pair centred over the label.
+    let finish = scenario::handles("button:sketch.finish")[0].1;
+    let cancel = scenario::handles("button:sketch.cancel")[0].1;
+    assert!(finish.x < label.x && label.x < cancel.x, "the label is centred under the pair, Finish first: {label:?} {finish:?} {cancel:?}");
 
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0));
     let mut out =
@@ -291,4 +293,18 @@ fn continuity_gap_and_sheet_metal_gap_are_separate_messages() {
         assert_eq!(locale.text("ui.continuity_gap"), legend, "{lang}");
         assert_eq!(locale.text("ui.sheet_gap"), sheet, "{lang}");
     }
+}
+
+/// The reference labels of the cataloguing fix: a label passed as text (`Cylindrical face`) and an
+/// id (`thread.iso_metric`).
+#[test]
+fn newly_catalogued_dialog_labels_show_in_german() {
+    let mut h = Harness::new();
+    h.app.preferences.language = "de".into();
+    h.app.home.open = false;
+    h.call("ui.start", json!({"command":"solid.thread"}));
+    h.frames(3);
+    assert!(h.widget("Zylindrische Fläche").is_some(), "the Cylindrical face row must be translated");
+    assert!(h.widget("ISO metrisch").is_some(), "the thread.iso_metric label must be translated");
+    assert!(h.widget("ISO metric").is_none(), "the label must not fall back to English");
 }

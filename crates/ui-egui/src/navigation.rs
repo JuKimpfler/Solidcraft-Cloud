@@ -37,6 +37,58 @@ impl NavCaps {
     pub const RENDER: NavCaps = NavCaps { orbit: true, pick: false };
 }
 
+/// Supplies the scroll phases browsers omit, before the shared navigation sees input.
+#[derive(Default)]
+pub struct WebWheelGestures {
+    last_scroll: Option<f64>,
+}
+
+impl WebWheelGestures {
+    /// Bracket point-mode swipes and return the delay until their idle timeout.
+    ///
+    /// Browsers expose no device identity. A bare vertical delta of at least
+    /// `WHEEL_STEP_MIN` points is a wheel notch (browsers report about 100 points per notch,
+    /// scaled by page zoom and display scaling); smaller point deltas and horizontal input
+    /// start a swipe. Once started, larger deltas and momentum belong to that swipe too.
+    pub fn update(&mut self, raw: &mut egui::RawInput, now: f64) -> Option<std::time::Duration> {
+        use egui::{Event, Modifiers, MouseWheelUnit, TouchPhase, Vec2};
+        const IDLE: f64 = 0.1;
+        const WHEEL_STEP_MIN: f32 = 40.0;
+        let phase_event = |phase| Event::MouseWheel { unit: MouseWheelUnit::Point, delta: Vec2::ZERO, modifiers: Modifiers::NONE, phase };
+        let valid_time = now.is_finite() && now >= 0.0;
+        let events = std::mem::take(&mut raw.events);
+        if self.last_scroll.is_some_and(|last| !valid_time || now < last || now - last >= IDLE) {
+            raw.events.push(phase_event(TouchPhase::End));
+            self.last_scroll = None;
+        }
+        for event in events {
+            match &event {
+                Event::MouseWheel { unit, delta, modifiers, .. } => {
+                    let point = *unit == MouseWheelUnit::Point;
+                    let valid_delta = delta.is_finite() && *delta != Vec2::ZERO;
+                    let step = delta.x == 0.0 && delta.y.abs() >= WHEEL_STEP_MIN;
+                    let swipe = valid_time && point && valid_delta && !modifiers.ctrl && (self.last_scroll.is_some() || !step);
+                    if swipe {
+                        if self.last_scroll.is_none() {
+                            raw.events.push(phase_event(TouchPhase::Start));
+                        }
+                        self.last_scroll = Some(now);
+                    } else if self.last_scroll.take().is_some() {
+                        raw.events.push(phase_event(TouchPhase::End));
+                    }
+                }
+                // eframe converts browser pinch Ctrl+wheel to Zoom before the hook.
+                Event::Zoom(_) if self.last_scroll.take().is_some() => {
+                    raw.events.push(phase_event(TouchPhase::End));
+                }
+                _ => {}
+            }
+            raw.events.push(event);
+        }
+        self.last_scroll.and_then(|last| std::time::Duration::try_from_secs_f64((IDLE - (now - last)).clamp(0.0, IDLE)).ok())
+    }
+}
+
 /// Raw wheel/trackpad input for one frame, split by source.
 ///
 /// Mouse wheels report lines or pages; trackpads report points. Trackpad
@@ -49,6 +101,7 @@ pub(crate) struct RawWheel {
     point_zoom: f32,
     /// Bracketed two-finger scroll in points (pans when panning is on).
     pan: egui::Vec2,
+    shift_pan: egui::Vec2,
     /// Bare horizontal input in points (thumb wheel: always pans sideways).
     mouse_pan: egui::Vec2,
 }
@@ -72,7 +125,7 @@ pub(crate) fn route_wheel_vertical(points: egui::Vec2, modifiers: egui::Modifier
 /// moves inside one pan, bare `Move` input is a mouse (vertical zooms,
 /// horizontal pans). Only point input brackets; line/page input always zooms.
 pub(crate) fn immediate_wheel(input: &egui::InputState, options: egui::InputOptions, page_height: f32, gesture: &mut bool) -> RawWheel {
-    let mut out = RawWheel { zoom: 0.0, point_zoom: 0.0, pan: egui::Vec2::ZERO, mouse_pan: egui::Vec2::ZERO };
+    let mut out = RawWheel { zoom: 0.0, point_zoom: 0.0, pan: egui::Vec2::ZERO, shift_pan: egui::Vec2::ZERO, mouse_pan: egui::Vec2::ZERO };
     for event in &input.events {
         let egui::Event::MouseWheel { unit, delta, modifiers, phase } = event else { continue };
         if modifiers.matches_any(options.zoom_modifier) {
@@ -100,7 +153,13 @@ pub(crate) fn immediate_wheel(input: &egui::InputState, options: egui::InputOpti
             egui::MouseWheelUnit::Page => *delta * page_height,
         };
         if point && *gesture {
-            out.pan += points;
+            if modifiers.shift && !modifiers.ctrl && !modifiers.command && !modifiers.alt {
+                if points.is_finite() {
+                    out.shift_pan += points.clamp(vec2(-1e4, -1e4), vec2(1e4, 1e4));
+                }
+            } else {
+                out.pan += points;
+            }
             // Legacy path only (ignored while panning is on).
             out.point_zoom += route_wheel_vertical(points, *modifiers, options);
         } else if point {
@@ -216,7 +275,8 @@ pub(crate) fn view_key(app: &mut SolveApp, ctx: &egui::Context, key: egui::Key, 
     if mods.alt || menu_open {
         return false;
     }
-    if key == Key::Num8 && ctrl && !mods.shift {
+    let result = crate::render_workspace::result_active(app);
+    if key == Key::Num8 && ctrl && !mods.shift && !result {
         crate::viewport::look_at_selection(app);
         return true;
     }
@@ -231,9 +291,14 @@ pub(crate) fn view_key(app: &mut SolveApp, ctx: &egui::Context, key: egui::Key, 
         // The model moves with the arrow, as it does under a pan drag.
         if let Some(rect) = app.viewport.rect {
             let step = rect.height() * 0.1;
-            camera_motion(app, rect, json!({"motion": "pan", "delta": [dx * step, dy * step]}));
+            let params = json!({"motion": "pan", "delta": [dx * step, dy * step]});
+            if result {
+                crate::render_workspace::with_result_camera(app, |app| camera_motion(app, rect, params));
+            } else {
+                camera_motion(app, rect, params);
+            }
         }
-    } else if !repeat {
+    } else if !repeat && !result {
         let degrees = if mods.shift { 90.0 } else { 15.0 };
         app.viewport.key_hold = Some(KeyHold { key, action, shift: mods.shift, since: app.now });
         // Turn from where a step in flight is going, so taps add up and the one animation is
@@ -241,13 +306,17 @@ pub(crate) fn view_key(app: &mut SolveApp, ctx: &egui::Context, key: egui::Key, 
         let from = app.cam_anim.map_or(app.cam, |a| a.to);
         let _ = app.run("view.navigate", json!({"camera": from, "action": action, "degrees": degrees}));
     }
-    true
+    ctrl || !result
 }
 
 /// Each frame an arrow turning the view is held past a tap: turn at a steady rate by the frame's
 /// time, with no animation of its own. Ends when the key is released or the keyboard goes
 /// elsewhere.
 pub(crate) fn step_key_hold(app: &mut SolveApp, ctx: &egui::Context) {
+    if crate::render_workspace::result_active(app) {
+        app.viewport.key_hold = None;
+        return;
+    }
     let Some(hold) = app.viewport.key_hold else { return };
     let (down, dt) = ctx.input(|i| (i.key_down(hold.key), f64::from(i.unstable_dt)));
     if !down || view_keys_blocked(app, ctx) {
@@ -327,11 +396,11 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
             i.pointer.delta(),
         )
     });
-    let hover = hover.filter(|p| !crate::shell::covered(app, *p));
+    let hover = hover.filter(|p| !crate::frame::dock_dragging(ui.ctx()) && !crate::shell::covered(app, *p));
     // The right button belongs to the marking menu while it is open.
     let secondary_down = secondary_down && app.viewport.context_menu.is_none();
     // The axis view handles its own clicks; the model underneath must not see them.
-    let axes = axis_rect(app, rect);
+    let axes = if caps.orbit { axis_rect(app, rect) } else { Rect::NOTHING };
     // Floating windows and menus own input over the model, including wheel navigation. egui's
     // hit test also counts the model as under the pointer a few points past its own edge and
     // inside a window's or a list's edge (#678), so the pointer must be in the viewport too,
@@ -353,7 +422,8 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
     let options = ui.ctx().options(|o| o.input_options);
     let page_height = ui.ctx().viewport_rect().height();
     let raw = ui.input(|i| immediate_wheel(i, options, page_height, &mut app.viewport.trackpad_gesture));
-    if trackpad_pan && raw.pan != egui::Vec2::ZERO {
+    let trackpad_orbit = trackpad_pan && app.preferences.nav == "fusion";
+    if trackpad_pan && (raw.pan != egui::Vec2::ZERO || raw.shift_pan != egui::Vec2::ZERO) {
         // Swallow egui's smoothing tail while the trackpad runs (a wheel-only
         // tail ends the moment trackpad input starts; mixed input is rare).
         app.viewport.trackpad_until_idle = true;
@@ -363,7 +433,8 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
         // (its End was lost); a stuck flag would pan future mouse input.
         app.viewport.trackpad_gesture = false;
     }
-    let mut pan = if trackpad_pan { raw.pan } else { egui::Vec2::ZERO } + raw.mouse_pan;
+    let mut pan =
+        if trackpad_pan { raw.pan + if trackpad_orbit { egui::Vec2::ZERO } else { raw.shift_pan } } else { egui::Vec2::ZERO } + raw.mouse_pan;
     pan.x *= crate::prefs::pan_sign_x(app);
     let scroll = if app.viewport.wheel_zoom_raw_until_idle || (trackpad_pan && app.viewport.trackpad_until_idle) {
         raw.zoom + if trackpad_pan { 0.0 } else { raw.point_zoom }
@@ -413,6 +484,11 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
             app.cancel_view_animation();
             app.cam.pan(f64::from(pan.x), f64::from(pan.y), h);
         }
+    }
+    if inside && caps.orbit && trackpad_orbit && raw.shift_pan != egui::Vec2::ZERO {
+        app.cancel_view_animation();
+        app.viewport.orbit_free = None;
+        orbit(app, rect, f64::from(raw.shift_pan.x), f64::from(raw.shift_pan.y), hover);
     }
     // A left press with the preset's keys (Alias: Shift+Alt) navigates until the button is let
     // go (kept through the release frame, so the end of the drag doesn't select either).
@@ -532,7 +608,7 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
             }
         }
     }
-    if !dragging && motion.is_none() {
+    if !dragging && motion.is_none() && !(trackpad_orbit && app.viewport.trackpad_gesture) {
         app.viewport.orbit_pivot = None;
         app.viewport.orbit_from = None;
     }
@@ -777,6 +853,112 @@ fn orbit_camera(app: &mut SolveApp, dx: f64, dy: f64) {
 
 #[cfg(test)]
 mod tests {
+    fn web_wheel(unit: egui::MouseWheelUnit, delta: egui::Vec2, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::MouseWheel { unit, delta, modifiers, phase: egui::TouchPhase::Move }
+    }
+
+    fn web_frame(
+        state: &mut super::WebWheelGestures,
+        time: f64,
+        events: Vec<egui::Event>,
+        gesture: &mut bool,
+    ) -> (super::RawWheel, Vec<egui::Event>) {
+        let mut raw = egui::RawInput { time: Some(time), events, focused: true, ..Default::default() };
+        let _ = state.update(&mut raw, time);
+        let events = raw.events.clone();
+        let mut input = egui::InputState::default();
+        input.events = raw.events;
+        (super::immediate_wheel(&input, egui::InputOptions::default(), 600.0, gesture), events)
+    }
+
+    #[test]
+    fn web_swipes_pan_from_the_first_delta_and_end_after_idle() {
+        use egui::{Modifiers, MouseWheelUnit::Point, TouchPhase, vec2};
+        let mut state = super::WebWheelGestures::default();
+        let mut gesture = false;
+        for (time, delta) in [(0.0, vec2(0.0, 7.5)), (0.04, vec2(3.0, 0.0)), (0.09, vec2(0.0, 120.0))] {
+            let (wheel, events) = web_frame(&mut state, time, vec![web_wheel(Point, delta, Modifiers::NONE)], &mut gesture);
+            assert_eq!(wheel.pan, delta);
+            assert_eq!(wheel.zoom, 0.0);
+            assert!(gesture);
+            let starts = events.iter().filter(|e| matches!(e, egui::Event::MouseWheel { phase: TouchPhase::Start, .. })).count();
+            assert_eq!(starts, usize::from(time == 0.0));
+        }
+        let delay = state.update(&mut egui::RawInput::default(), 0.10).expect("schedule the idle end even without more input");
+        assert!((delay.as_secs_f64() - 0.09).abs() < 1e-9);
+        web_frame(&mut state, 0.18, vec![], &mut gesture);
+        assert!(gesture);
+        let (_, events) = web_frame(&mut state, 0.20, vec![], &mut gesture);
+        assert!(!gesture);
+        assert!(matches!(events.as_slice(), [egui::Event::MouseWheel { phase: TouchPhase::End, delta, .. }] if *delta == egui::Vec2::ZERO));
+        let (wheel, _) = web_frame(&mut state, 0.21, vec![web_wheel(Point, vec2(0.0, -2.0), Modifiers::NONE)], &mut gesture);
+        assert_eq!(wheel.pan, vec2(0.0, -2.0));
+    }
+
+    #[test]
+    fn web_wheel_steps_and_pinch_keep_zooming() {
+        use egui::{Modifiers, MouseWheelUnit::*, vec2};
+        for (unit, delta, mods) in [
+            (Point, vec2(0.0, 120.0), Modifiers::NONE),
+            (Point, vec2(0.0, -100.0), Modifiers::NONE),
+            (Point, vec2(0.0, 125.0), Modifiers::NONE),
+            (Point, vec2(0.0, -111.111), Modifiers::NONE),
+            (Line, vec2(1.0, 3.0), Modifiers::NONE),
+            (Page, vec2(0.0, 1.0), Modifiers::NONE),
+            (Point, vec2(0.0, 2.5), Modifiers::CTRL),
+        ] {
+            let mut state = super::WebWheelGestures::default();
+            let mut gesture = false;
+            let event = web_wheel(unit, delta, mods);
+            let (wheel, events) = web_frame(&mut state, 0.0, vec![event.clone()], &mut gesture);
+            assert_eq!(events, vec![event.clone()]);
+            assert_eq!(wheel.pan, egui::Vec2::ZERO);
+            if !mods.ctrl {
+                assert_ne!(wheel.zoom, 0.0);
+            }
+            web_frame(&mut state, 0.01, vec![web_wheel(Point, vec2(0.0, 2.5), Modifiers::NONE)], &mut gesture);
+            assert!(gesture);
+            let (wheel, _) = web_frame(&mut state, 0.02, vec![event], &mut gesture);
+            // Point steps can occur during a swipe; explicit line/page wheels and Ctrl cannot.
+            if unit != Point || mods.ctrl {
+                assert!(!gesture);
+                assert_eq!(wheel.pan, egui::Vec2::ZERO);
+            }
+        }
+        let mut state = super::WebWheelGestures::default();
+        let mut gesture = false;
+        web_frame(&mut state, 0.0, vec![web_wheel(Point, vec2(0.0, 2.5), Modifiers::NONE)], &mut gesture);
+        assert!(gesture);
+        let (_, events) = web_frame(&mut state, 0.01, vec![egui::Event::Zoom(1.1)], &mut gesture);
+        assert!(!gesture);
+        assert_eq!(events.last(), Some(&egui::Event::Zoom(1.1)));
+        let mut input = egui::InputState::default();
+        input.events = events;
+        assert!((super::pinch_factor(&input) - 1.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn web_gesture_timeout_and_invalid_input_do_not_leave_a_gesture_active() {
+        use egui::{Modifiers, MouseWheelUnit::Point, vec2};
+        let mut state = super::WebWheelGestures::default();
+        let mut gesture = false;
+        web_frame(&mut state, 1.0, vec![web_wheel(Point, vec2(0.0, 3.5), Modifiers::NONE)], &mut gesture);
+        let (wheel, events) = web_frame(&mut state, 1.2, vec![web_wheel(Point, vec2(0.0, 120.0), Modifiers::NONE)], &mut gesture);
+        assert_eq!(wheel.zoom, 120.0);
+        assert!(!gesture);
+        assert_eq!(events.len(), 2);
+        for time in [f64::NAN, f64::INFINITY, -1.0] {
+            web_frame(&mut state, 2.0, vec![web_wheel(Point, vec2(0.0, 3.5), Modifiers::NONE)], &mut gesture);
+            web_frame(&mut state, time, vec![], &mut gesture);
+            assert!(!gesture);
+        }
+        for delta in [vec2(f32::NAN, 1.0), vec2(0.0, f32::INFINITY), vec2(0.0, 0.0)] {
+            let (_, events) = web_frame(&mut state, 3.0, vec![web_wheel(Point, delta, Modifiers::NONE)], &mut gesture);
+            assert_eq!(events.len(), 1);
+            assert!(!gesture);
+        }
+    }
+
     #[test]
     fn clamped_drag_stays_reversible_and_restarts_after_free_orbit() {
         use super::*;
@@ -1130,6 +1312,21 @@ mod tests {
                 }
             }
             assert!(panned, "{preset}: some binding pans");
+            frame(&mut app, Modifiers::NONE, vec![Event::PointerMoved(at)]);
+            for modifiers in [Modifiers::NONE, Modifiers::SHIFT] {
+                let before = app.cam;
+                for phase in [egui::TouchPhase::Start, egui::TouchPhase::Move, egui::TouchPhase::End] {
+                    frame(
+                        &mut app,
+                        modifiers,
+                        vec![Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(20.0, -10.0), modifiers, phase }],
+                    );
+                }
+                assert_eq!(app.cam.back(), before.back(), "{preset}: trackpad turned a flat page");
+                if preset == "fusion" && modifiers.shift {
+                    assert_eq!(app.cam, before, "orbit gestures must do nothing on a flat page");
+                }
+            }
             let before = app.cam;
             let wheel = Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Line,
@@ -1332,6 +1529,42 @@ mod view_key_tests {
         assert!(turn(mid.yaw, anim.from.yaw).abs() < 15f64.to_radians(), "continues from the camera as it is");
         h.settle();
         assert!((turn(before, h.app.cam.yaw).abs() - 30f64.to_radians()).abs() < 1e-6);
+    }
+
+    /// Ctrl+1…7 run Front … Isometric View by default, turning the view as the view cube's faces
+    /// do; the keys are ordinary shortcuts, so one can be moved to another command and back.
+    #[test]
+    fn ctrl_digits_turn_to_the_standard_views_and_can_be_rebound() {
+        use solidcraft_engine::render::StandardView;
+        let mut h = Harness::new();
+        h.app.preferences.look_at_anim = false;
+        h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 10})).unwrap();
+        h.frames(2);
+        let looks_from = |h: &mut Harness, digit: &str, view: StandardView| {
+            // Start from somewhere else, so the key has to move the view.
+            h.step(&json!({"key": "ArrowLeft"})).unwrap();
+            h.frames(2);
+            h.step(&json!({"key": digit, "cmd": true})).unwrap();
+            h.frames(2);
+            let mut want = h.app.cam;
+            want.set_view(view);
+            (h.app.cam.back() - want.back()).len() < 1e-6
+        };
+        for (digit, view) in [
+            ("1", StandardView::Front),
+            ("2", StandardView::Back),
+            ("3", StandardView::Left),
+            ("4", StandardView::Right),
+            ("5", StandardView::Top),
+            ("6", StandardView::Bottom),
+            ("7", StandardView::Iso),
+        ] {
+            assert!(looks_from(&mut h, digit, view), "Ctrl+{digit} turns to {view:?}: {:?}", h.app.cam.back());
+        }
+        // Top moves to Ctrl+T; Ctrl+5 then does nothing, Ctrl+T turns to the top.
+        crate::keymap::bind(&mut h.app, "view.top", "Ctrl+T", false).unwrap();
+        assert!(!looks_from(&mut h, "5", StandardView::Top), "Ctrl+5 no longer turns to the top");
+        assert!(looks_from(&mut h, "T", StandardView::Top), "Ctrl+T does");
     }
 
     /// #1886: Ctrl+8 looks straight at the sketch; pressed again while the view faces it, it

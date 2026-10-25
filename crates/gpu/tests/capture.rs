@@ -45,6 +45,11 @@ fn session(script: &[(&str, serde_json::Value)]) -> Session {
 fn opengl_viewport_pipelines_render_a_model() {
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = wgpu::Backends::GL;
+    // NVIDIA's EGL answers wgpu's request for GL 3.3 with exactly 3.3 yet lists
+    // GL_ARB_compute_shader, so wgpu builds its indirect-call validation pipeline, naga cannot
+    // emit compute GLSL below 4.30, and request_device fails as Device(Lost). The test draws
+    // nothing indirect, so the validation is not needed here.
+    desc.flags.remove(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL);
     let instance = wgpu::Instance::new(desc);
     let adapter = match pollster::block_on(instance.request_adapter(&Default::default())) {
         Ok(adapter) => adapter,
@@ -89,6 +94,31 @@ fn pictures_show_appearances() {
     let red = pixels(&img).filter(|p| p[0] > 150 && p[1] < 90 && p[2] < 80).count();
     assert!(green > 100 && red > 100, "green top {green}, red cylinder {red} pixels");
     assert!(pixels(&img).all(|p| p[3] == 255), "the picture is opaque");
+}
+
+/// The renderer counts what it draws (the performance overlay, #2548): every mesh triangle and
+/// edge segment of the scene, more with more geometry, nothing with nothing to draw.
+#[test]
+fn the_renderer_counts_what_it_draws() {
+    let Some(c) = capturer() else { return };
+    let drawn = |s: &Session| {
+        let cam = view::home_camera(s);
+        let scene = view::scene_with_guides(s, &cam, None, Guides { grid: false, axes: false });
+        let triangles: usize = scene.meshes.iter().map(|m| m.mesh.triangles.len()).sum();
+        c.rgba(&scene, &cam, 160, 100).unwrap();
+        (c.last_stats(), triangles as u64)
+    };
+    let (empty, _) = drawn(&Session::default());
+    assert_eq!((empty.triangles, empty.line_segments), (0, 0), "{empty:?}");
+    let (one, one_mesh) = drawn(&session(&[("solid.box", json!({"length": 40, "width": 30, "height": 20}))]));
+    assert!(one_mesh >= 12 && one.triangles >= one_mesh, "{one:?} for {one_mesh} mesh triangles");
+    assert!(one.line_segments >= 12 && one.draw_calls > empty.draw_calls, "{one:?}");
+    let (two, two_mesh) = drawn(&session(&[
+        ("solid.box", json!({"length": 40, "width": 30, "height": 20})),
+        ("solid.cylinder", json!({"diameter": 14, "height": 30, "base": [50, 15, 0], "operation": "new"})),
+    ]));
+    assert!(two_mesh > one_mesh && two.triangles >= two_mesh && two.triangles > one.triangles, "{two:?} for {two_mesh}");
+    assert!(two.line_segments > one.line_segments, "{two:?}");
 }
 
 /// The ground grid and the origin's axes each change the picture.
@@ -140,6 +170,26 @@ fn pictures_show_the_section_and_its_cap() {
         let cap = pixels(&img).filter(|p| i32::from(p[0]) - i32::from(p[2]) > 20).count();
         assert!(cap > 500, "fov {fov}: cap pixels {cap}");
     }
+}
+
+/// With the section's hatch off, the cut shows plain in its body's own colour, as the CPU
+/// rasterizer draws it; hatched, it is tinted and striped.
+#[test]
+fn pictures_show_a_plain_cut_without_the_hatch() {
+    let Some(c) = capturer() else { return };
+    let mut s = session(&[
+        ("solid.box", json!({"length": 40, "width": 30, "height": 20})),
+        ("appearance.assign", json!({"bodies": ["Body1"], "color": [40, 160, 90]})),
+    ]);
+    let cam = view::home_camera(&s);
+    let mut picture = |hatch: bool| {
+        s.execute("inspect.section", &json!({"plane": {"origin": [0, 15, 0], "normal": [0, -1, 0]}, "hatch": hatch})).unwrap();
+        c.rgba(&view::scene(&s, &cam), &cam, 300, 220).unwrap()
+    };
+    let solid = |img: &[u8]| pixels(img).filter(|p| p[..3].iter().zip([40u8, 160, 90]).all(|(a, b)| a.abs_diff(b) <= 3)).count();
+    let (hatched, plain) = (picture(true), picture(false));
+    assert!(solid(&plain) > 500, "plain cut: {} pixels in the body's colour", solid(&plain));
+    assert!(solid(&hatched) < 50, "the hatched cut is tinted: {}", solid(&hatched));
 }
 
 /// Surface analysis shades headless pictures as it shades the viewport: a box's flat faces in

@@ -48,7 +48,8 @@
 //! `CHROME` or the usual install locations; `cargo xtask ci` skips this test when there is none.
 //!
 //! The stand-in app has a content-named script, a `shared.js` whose name is the same in every
-//! build (a page must get its own build's), and an on-demand file under `fonts/` (not kept).
+//! build (a page must get its own build's), more files under `icons/` than the browser asks for
+//! at once, and an on-demand file under `fonts/` (not kept).
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -73,6 +74,9 @@ const LAUNCH_TIMEOUT: Duration = Duration::from_secs(240);
 const SLOW_NETWORK_WAIT: Duration = Duration::from_secs(3);
 /// Where Mode::SignIn redirects to (on `localhost`: another origin than the 127.0.0.1 app).
 const SIGN_IN: &str = "/sign-in";
+/// How many requests Chrome sends to one server at a time over HTTP/1.1; the rest wait for a
+/// free connection.
+const CONNECTIONS_PER_SERVER: usize = 6;
 
 /// Exercise the real browser build's command bridge, using the same Chrome harness as the offline test.
 pub fn run_api(site: &str) -> Result<(), String> {
@@ -86,13 +90,53 @@ pub fn run_api(site: &str) -> Result<(), String> {
     server.set(Mode::Serve(site));
     let browser = Chrome::launch(&chrome, &work.0.join("profile"))?;
     let mut cdp = browser.connect()?;
+    let downloads = work.0.join("downloads");
+    std::fs::create_dir_all(&downloads).map_err(|e| e.to_string())?;
+    cdp.call("Browser.setDownloadBehavior", json!({"behavior": "allow", "downloadPath": downloads}))?;
     cdp.call("Emulation.setDeviceMetricsOverride", json!({"width": 1280, "height": 900, "deviceScaleFactor": 1, "mobile": false}))?;
-    cdp.call("Page.navigate", json!({"url": format!("http://127.0.0.1:{}{PREFIX}?webgl", server.port)}))?;
+    // The page has the keyboard, as a tab the user is looking at does (for KEYS_TEST).
+    cdp.call("Emulation.setFocusEmulationEnabled", json!({"enabled": true}))?;
+    // Use the app's normal backend selection, including WebGPU where available.
+    cdp.call("Page.navigate", json!({"url": format!("http://127.0.0.1:{}{PREFIX}", server.port)}))?;
     wait_for(&mut cdp, "!!window.solidcraft && !document.getElementById('solidcraft_loading')", "the browser API is ready", |v| v == true)?;
     let result = cdp.eval(API_TEST)?;
+    let path = downloads.join("Untitled-view.dxf");
+    let started = Instant::now();
+    loop {
+        if let Ok(dxf) = std::fs::read_to_string(&path) {
+            if !(dxf.contains("ENTITIES") && dxf.contains("VISIBLE") && dxf.contains("EOF")) {
+                return Err("web-api-test: the view download is not a complete DXF drawing".into());
+            }
+            break;
+        }
+        if started.elapsed() > LAUNCH_TIMEOUT {
+            return Err("web-api-test: Export Current View did not download its DXF".into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     println!("web-api-test: {result}");
+    let keys = cdp.eval(KEYS_TEST)?;
+    println!("web-api-test: {keys}");
     Ok(())
 }
+
+/// The browser's own tab switching keys reach it while the app has the keyboard (#5227): their
+/// default action isn't cancelled, while Tab's is (the app moves between its fields with it).
+const KEYS_TEST: &str = r#"(async () => {
+    const check = (condition, message) => { if (!condition) throw new Error(message); };
+    const canvas = document.getElementById('solidcraft_canvas');
+    canvas.focus();
+    canvas.dispatchEvent(new FocusEvent('focus'));
+    const cancelled = init => {
+        const e = new KeyboardEvent('keydown', {key: 'Tab', code: 'Tab', bubbles: true, cancelable: true, ...init});
+        canvas.dispatchEvent(e);
+        return e.defaultPrevented;
+    };
+    check(!cancelled({ctrlKey: true}), 'Ctrl+Tab is left to the browser');
+    check(!cancelled({ctrlKey: true, shiftKey: true}), 'Ctrl+Shift+Tab is left to the browser');
+    check(cancelled({}), 'the app takes Tab (it has the keyboard)');
+    return {ctrl_tab: 'browser', ctrl_shift_tab: 'browser', tab: 'app'};
+})()"#;
 
 const API_TEST: &str = r#"(async () => {
     const app = window.solidcraft;
@@ -132,7 +176,30 @@ const API_TEST: &str = r#"(async () => {
     check((await app.inspect()).bodies.length === 1, 'API still works after rejected requests');
     const ui = await app.request('ui.inspect');
     check(ui.home === false && ui.viewport[2] > 600, 'model viewport is visible');
-    return {commands: 'discovered', bodies: [0, 1, 0, 1], errors: 'rejected', queue: '256 completed, 1 rejected'};
+    // #3431: a native Instant compiles for wasm but panics when exporting in the browser.
+    // Exercise both the command timer and the projection/occlusion timers on the real target.
+    // A wasm abort stops the frame loop before it can settle the command's reply.
+    const crashed = new Promise((_, reject) => {
+        window.addEventListener('error', event => reject(event.error || new Error(event.message)), {once: true});
+    });
+    for (const hidden of ['omit', 'dashed']) {
+        const drawing = await Promise.race([app.execute('file.export_view_dxf', {camera: ui.camera, hidden}), crashed]);
+        check(drawing.units === 'mm' && drawing.visible > 0, 'view export contains visible edges in mm');
+        check(drawing.dxf.includes('ENTITIES') && drawing.dxf.includes('VISIBLE'), 'view export returns a DXF drawing');
+        check(drawing.dxf.includes('HIDDEN') === (hidden === 'dashed'), 'view export respects the hidden-edge option');
+        for (const stage of ['prepare_ms', 'projection_ms', 'occlusion_ms']) {
+            check(Number.isFinite(drawing.stats[stage]) && drawing.stats[stage] >= 0, stage + ' is a valid browser timing');
+        }
+    }
+    check((await app.inspect()).bodies.length === 1, 'view export preserves the document');
+    await app.request('ui.start', {command: 'file.export_view_dxf'});
+    // Let the new dialog finish its initial layout before taking the button's position.
+    await app.request('ui.inspect');
+    await app.request('ui.inspect');
+    const [x, y] = await app.request('ui.at', {handle: 'dialog:Export DXF…'});
+    await app.request('ui.click', {x, y});
+    return {commands: 'discovered', bodies: [0, 1, 0, 1], errors: 'rejected', queue: '256 completed, 1 rejected',
+        dxf: 'omit and dashed exported; dialog download checked'};
 })()"#;
 
 /// Run the test; `required: false` (from `cargo xtask ci`) skips it when Chrome is missing.
@@ -258,7 +325,11 @@ pub fn run(root: &Path, site: Option<&str>, required: bool) -> Result<(), String
     server.set(Mode::FailFast(v2.clone()));
     let t = launch(&mut cdp, "v1")?;
     // The other files of v2 are asked for (and held) around the page's failure; let them go.
-    server.wait_asked_slowly(asked + kept.get(1).map_or(0, |(_, n)| n.saturating_sub(1)))?;
+    // Only as many as the browser sends at once (less the page's connection) are sure to be
+    // asked for: the page's failure cancels the download, and with it the files still waiting
+    // for a connection (a real build has more files than that).
+    let others = kept.get(1).map_or(0, |(_, n)| n.saturating_sub(1));
+    server.wait_asked_slowly(asked + others.min(CONNECTIONS_PER_SERVER - 1))?;
     server.release();
     wait_for(&mut cdp, &state_js, "no download is left marked in progress", |s| s["caches"].get(&name2_).is_some() && s["filling"] == json!([]))?;
     step("one file fails at once, others are still coming: v1 starts; v2's isn't left in progress", t);
@@ -500,6 +571,11 @@ fn stand_in(dir: &Path, build: &str, registration: &str) -> Result<(), String> {
     write("index.html", mark(&page, build)?)?;
     write(&format!("app-{build}.js"), format!("document.documentElement.dataset.started = \"{build}\";\n"))?;
     write("shared.js", format!("document.documentElement.dataset.shared = \"{build}\";\n"))?;
+    // More files than the browser asks for at once, as in a real build (icons, styles, wasm).
+    std::fs::create_dir_all(dir.join("icons")).map_err(|e| format!("icons: {e}"))?;
+    for i in 0..CONNECTIONS_PER_SERVER {
+        write(&format!("icons/{i}.txt"), format!("{build} {i}\n"))?;
+    }
     std::fs::create_dir_all(dir.join("fonts")).map_err(|e| format!("fonts: {e}"))?;
     write("fonts/on-demand.txt", format!("{build}\n"))
 }
