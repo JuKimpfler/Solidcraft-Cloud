@@ -45,7 +45,7 @@ unseren Dienst einhängt). Unser Code in der Web-Hülle steht in
 | M2 | Client-Anbindung (Öffnen/Speichern über den Server) | fertig, im Browser gegen den Datei-Server getestet; Einsatz auf dem Pi steht aus |
 | M3 | Sperren in der App | fertig, im Browser gegen den Datei-Server getestet; Einsatz auf dem Pi steht aus |
 | M4 | Startseite mit Server-Designs | fertig, im Browser gegen den Datei-Server getestet; Einsatz auf dem Pi steht aus |
-| M5 | Automatische Updates (Upstream-Abgleich) | offen |
+| M5 | Automatische Updates (Upstream-Abgleich) | Workflow `upstream-sync.yml` (alle 6 Stunden, Pull Request oder Issue bei Konflikten); erster Lauf steht aus |
 | M6 | Desktop-App mit Server-Speicher, Sperren und Startseite (Windows/Linux/macOS) | fertig, unter Linux gegen Apache und Datei-Server getestet (zwei Benutzer: Speichern, Sperre, Kopie, Freigabe beim Beenden); Windows und Pi stehen aus |
 
 ## Desktop-App (M6)
