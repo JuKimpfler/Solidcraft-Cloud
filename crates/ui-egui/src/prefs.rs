@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 pub use solidcraft_engine::doc::display_units::{format_length, length_number, length_precision, unit_scale};
 use solidcraft_engine::geom::Vec3;
+use solidcraft_engine::render::Camera;
 
 /// The key the apps keep the preferences under in eframe's storage.
 pub const STORAGE_KEY: &str = "solidcraft.prefs";
@@ -331,6 +332,53 @@ pub enum OrbitAround {
     Cursor,
 }
 
+/// Where the view goes when a sketch ends (Preferences: "When a sketch ends", #7038).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SketchExitView {
+    /// Back to the view from before the sketch opened.
+    Previous,
+    /// The view stays where it is (the default since #4909).
+    #[default]
+    Keep,
+    /// Back to the view from before the sketch, unless the sketch view was turned: a view only
+    /// panned or zoomed goes back, a turned one stays.
+    UnlessRotated,
+}
+
+impl SketchExitView {
+    pub const ALL: [Self; 3] = [Self::Previous, Self::Keep, Self::UnlessRotated];
+
+    /// The message id of the choice's label.
+    pub fn label_id(self) -> &'static str {
+        match self {
+            Self::Previous => "prefs.sketch_exit_view.previous",
+            Self::Keep => "prefs.sketch_exit_view.keep",
+            Self::UnlessRotated => "prefs.sketch_exit_view.unless_rotated",
+        }
+    }
+
+    /// The view to turn to when a sketch ends with the camera at `now`, or `None` to leave it.
+    /// `before` is the view from before the sketch opened and `facing` the one it turned to then.
+    /// Going back keeps `now`'s projection, so a perspective switch made in the sketch stays.
+    pub fn view_after(self, before: Camera, facing: Camera, now: Camera) -> Option<Camera> {
+        let back = Camera { fov: now.fov, ..before };
+        match self {
+            Self::Previous => Some(back),
+            Self::Keep => None,
+            Self::UnlessRotated => same_orientation(facing, now).then_some(back),
+        }
+    }
+}
+
+/// Whether two cameras look the same way: pans and zooms move a camera without turning it.
+/// Half a degree absorbs rounding in the animation that turned the view to face the sketch.
+fn same_orientation(a: Camera, b: Camera) -> bool {
+    let near = 0.5_f64.to_radians().cos();
+    let ((ar, au, ab), (br, bu, bb)) = (a.basis(), b.basis());
+    ar.dot(br) > near && au.dot(bu) > near && ab.dot(bb) > near
+}
+
 /// Which program reads the 3D mouse on Linux when both spacenavd and the device itself (hidraw)
 /// are there (Preferences: "3D mouse driver"). Read by the app's reader, not by this crate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -566,6 +614,9 @@ preference_settings! {
     /// Interface font: an installed font family (or a font file), or empty for the built-in one
     /// (#1290). Menus, dialogs and labels use it; glyphs it lacks fall back as before.
     ui_font: String = String::new(), PAGE_INTERFACE;
+    /// While a dialog or a sketch is open, OK and Cancel in the view's top right corner, with the
+    /// axis view moved down below them (#6709). Off by default.
+    view_confirm_corner: bool = false, PAGE_INTERFACE => check_id("prefs.view_confirm_corner");
     /// Put the feature history to the left of the browser instead of below the viewport.
     timeline_left: bool = false, PAGE_INTERFACE;
     /// Measured outer width; the contents react to this width without a names mode.
@@ -609,6 +660,10 @@ preference_settings! {
     hole_moves: bool = false, PAGE_DESIGN => check("Move holes by clicking or dragging");
     /// The browser's Origin folder starts hidden in designs that don't keep its eye themselves.
     hide_origin: bool = false, PAGE_DESIGN => check_tr("ui.hide_origin_by_default");
+    /// Handles on the preview of a feature placed on a face (Rest, Boss, Snap Fit): a marker that
+    /// drags it across the model and a ring that turns it. Off by default: the feature is then placed
+    /// by its click only, as before, and its Position input takes faces only.
+    placement_handles: bool = false, PAGE_DESIGN => check("Placement handles", "Handles on the preview of a Rest, Boss or Snap Fit: drag the marker to move it across the model, turn it by its ring");
     /// What a middle-button double-click in the view does: `home`, `fit` or `off`.
     middle_double_click: String = "home".into(), PAGE_NAVIGATION;
     /// Colour vision mode (#778): `off`, `protan`, `deutan` or `tritan`.
@@ -622,6 +677,9 @@ preference_settings! {
     /// The variant last started in each split tool family (Rectangle, Circle, Arc, Slot, Polygon, Line,
     /// Spline): the family's button and shortcut start it again (`sketch_families`).
     sketch_variants: crate::sketch_families::Choices = crate::sketch_families::Choices::default();
+    /// Personal Hole parameter combinations, shared by every design in this profile.
+    /// No page reset discards this user-authored library.
+    hole_presets: crate::hole_presets::Library = crate::hole_presets::Library::default();
     save_mesh_format: String = "stl".into();
     /// Hidden edges in the current-view DXF export (false: omit, true: dashed).
     view_dxf_dashed: bool = false;
@@ -680,6 +738,8 @@ preference_settings! {
     /// A sketch tool's shortcut pressed again before the first point steps to the tool's next
     /// creation mode (#2459). Off (the default): the key starts the tool again, as it always has.
     shortcut_cycles_modes: bool = false, PAGE_SKETCH;
+    /// Where the view goes when a sketch ends (#7038). Keep (the default) leaves it as it is.
+    sketch_exit_view: SketchExitView = SketchExitView::default(), PAGE_SKETCH;
     /// When true: Shift+click adds without removing; Primary toggles.
     /// When false (default): Shift and Primary both toggle.
     selection_shift_add_only: bool = false, PAGE_SKETCH;
@@ -748,6 +808,7 @@ struct Snapshot {
     dark: bool,
     layout: crate::shell::LayoutMode,
     grid: bool,
+    navigation_bar: bool,
     shadow: bool,
     perspective: bool,
     style: u8,
@@ -765,6 +826,7 @@ impl Snapshot {
             dark: app.ui.dark,
             layout: app.ui.layout,
             grid: app.ui.show_grid,
+            navigation_bar: app.ui.show_navigation_bar,
             shadow: app.ui.ground_shadow,
             perspective: app.ui.perspective,
             style: app.ui.visual_style,
@@ -788,6 +850,7 @@ impl Snapshot {
         app.ui.dark = self.dark;
         app.ui.layout = self.layout;
         app.ui.show_grid = self.grid;
+        app.ui.show_navigation_bar = self.navigation_bar;
         app.ui.ground_shadow = self.shadow;
         app.ui.perspective = self.perspective;
         app.ui.visual_style = self.style;
@@ -966,6 +1029,7 @@ fn defaults(app: &mut SolveApp, page: usize) {
         PAGE_INTERFACE => {
             app.ui.dark = true;
             app.ui.layout = app.preferences.layout;
+            app.ui.show_navigation_bar = true;
         }
         PAGE_AI => app.ui.agent_cursor = Default::default(),
         PAGE_NAVIGATION | PAGE_DESIGN => {}
@@ -3291,6 +3355,7 @@ mod tests {
             ("browser_float", json!(true), PAGE_INTERFACE),
             ("color_vision", json!("protan"), PAGE_INTERFACE),
             ("viewport_theme", json!("light"), PAGE_INTERFACE),
+            ("view_confirm_corner", json!(true), PAGE_INTERFACE),
             ("nav", json!("blender"), PAGE_NAVIGATION),
             ("look_at_anim", json!(false), PAGE_NAVIGATION),
             ("selection_shift_add_only", json!(true), PAGE_SKETCH),
@@ -3332,6 +3397,68 @@ mod tests {
         defaults(&mut app, PAGE_SKETCH);
         assert!(!app.ui.pick_bodies);
         assert!(app.session.auto_project);
+    }
+
+    fn hole_preset_row(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name, "style": "counterbore", "extent": "distance",
+            "diameter": "shaft_diameter + 0.2 mm", "depth": "0.5 in",
+            "cb_diameter": "10 mm", "cb_depth": "3 mm", "cs_diameter": "10 mm",
+            "cs_angle": "90 deg", "tip_angle": "118 deg", "tapped": true, "thread": "M5"
+        })
+    }
+
+    #[test]
+    fn hole_presets_corrupt_rows_and_limits_do_not_discard_other_preferences() {
+        use serde_json::json;
+        let good = hole_preset_row("Workshop");
+        let mut oversized = hole_preset_row("Too long");
+        oversized["diameter"] = json!("x".repeat(513));
+        let mut duplicate = good.clone();
+        duplicate["name"] = json!("WORKSHOP");
+        let p = super::lenient(&json!({"length_decimals":4,"hole_presets":[null,good,oversized,duplicate,{"name":"incomplete"}]}));
+        assert_eq!(p.length_decimals, 4);
+        let rows = serde_json::to_value(&p.hole_presets).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(rows[0]["name"], "Workshop");
+        assert_eq!(rows[0]["diameter"], "shaft_diameter + 0.2 mm");
+        assert_eq!(rows[0]["depth"], "0.5 in");
+        let corrupt = super::lenient(&json!({"length_decimals":3,"hole_presets":{"unexpected":true}}));
+        assert_eq!(corrupt.length_decimals, 3);
+        assert_eq!(serde_json::to_value(corrupt.hole_presets).unwrap(), json!([]));
+        let many: Vec<_> = (0..100).map(|i| hole_preset_row(&format!("Preset {i}"))).collect();
+        let capped = super::lenient(&json!({"hole_presets":many}));
+        assert_eq!(serde_json::to_value(capped.hole_presets).unwrap().as_array().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn hole_presets_survive_application_preferences_roundtrip_and_page_resets() {
+        use serde_json::json;
+        let mut app = crate::SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
+        let mut row = hole_preset_row("Fixture");
+        row["thread_options"] = json!({"handedness":"left","full_length":false,"depth":"4 mm"});
+        super::set(&mut app, &json!({"hole_presets":[row]})).unwrap();
+        let expected = serde_json::to_value(&app.preferences.hole_presets).unwrap();
+        assert_eq!(expected[0]["thread_options"]["handedness"], "left");
+        for page in 0..super::PAGES.len() {
+            super::reset_preferences(&mut app.preferences, page);
+        }
+        assert_eq!(serde_json::to_value(&app.preferences.hole_presets).unwrap(), expected);
+        let saved = app.prefs();
+        let mut other = crate::SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
+        other.load_prefs(&saved);
+        assert_eq!(serde_json::to_value(&other.preferences.hole_presets).unwrap(), expected);
+        assert!(other.session.doc.features.is_empty());
+    }
+
+    #[test]
+    fn hole_presets_keep_unknown_thread_options_for_safe_future_recall() {
+        use serde_json::json;
+        let mut row = hole_preset_row("Newer version");
+        row["thread_options"] = json!({"starts":2});
+        let p = super::lenient(&json!({"hole_presets":[row]}));
+        let saved = serde_json::to_value(p.hole_presets).unwrap();
+        assert_eq!(saved[0]["thread_options"]["starts"], 2, "unknown thread semantics must not silently become the defaults");
     }
 
     /// The interface font (#1290): a font that can be read, or empty for the built-in one; saved

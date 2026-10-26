@@ -642,7 +642,9 @@ fn file_menu(app: &mut SolveApp, ctx: &egui::Context) {
                     FileAction::Save.run(app);
                     close = true;
                 }
-                if item_if(ui, &format!("{}…", app.tr("ui.save_as")), "", "save", shown) {
+                // Save As shows the shortcut of the command it runs, from the app's own registry.
+                let save_as_key = crate::keymap::effective(app, "file.save_as").unwrap_or_default();
+                if item_if(ui, &format!("{}…", app.tr("ui.save_as")), &save_as_key, "save", shown) {
                     FileAction::SaveAs.run(app);
                     close = true;
                 }
@@ -896,8 +898,9 @@ fn ribbon_text(ui: &egui::Ui, at: egui::Pos2, text: &str, size: f32, color: Colo
 }
 
 /// SKETCH while editing a sketch and SHEET METAL while a sheet body is active take the contextual
-/// tab style; SHEET METAL is an ordinary tab otherwise.
-fn contextual_tab(app: &SolveApp, tab: &str) -> bool {
+/// tab style; SHEET METAL is an ordinary tab otherwise. WELDMENTS selects itself on a frame member
+/// but keeps the ordinary tab look, as MODEL has when selected.
+pub(crate) fn contextual_tab(app: &SolveApp, tab: &str) -> bool {
     tab == "SKETCH" || (tab == "SHEET METAL" && crate::workspace::sheet_body(app).is_some())
 }
 
@@ -1996,7 +1999,12 @@ pub fn shortcuts(app: &mut SolveApp, ctx: &egui::Context) {
     }
     // A dimension value that is taking the keyboard: letters belong to it (a parameter name
     // starting with L or D), even on the frame before its field holds the focus.
-    if egui::Popup::is_any_open(ctx) || ctx.egui_wants_keyboard_input() || crate::dim_view::editing() || crate::dialogs_save_mesh::popup_open(ctx) {
+    if egui::Popup::is_any_open(ctx)
+        || ctx.egui_wants_keyboard_input()
+        || crate::dim_view::editing()
+        || crate::dialogs_save_mesh::popup_open(ctx)
+        || crate::hole_presets::name_prompt_open(ctx, app.dialog.as_ref())
+    {
         return;
     }
     let (keys, mods) = ctx.input(|i| {
@@ -2043,6 +2051,8 @@ pub fn shortcuts(app: &mut SolveApp, ctx: &egui::Context) {
                 Key::Y => drop(app.run("edit.redo", json!({}))),
                 // Copy, Cut and Paste (`edit_clipboard::handle`).
                 Key::C | Key::X | Key::V if !mods.shift && !mods.alt => {}
+                // Ctrl+Shift+S is Save As; Ctrl+S keeps saving over the current file (#6558).
+                Key::S if mods.shift && !mods.alt => save_as(app),
                 Key::S => save(app),
                 _ => crate::keymap::press(app, &crate::keymap::key_name(k, mods), repeat),
             }
@@ -2090,7 +2100,7 @@ pub fn shortcuts(app: &mut SolveApp, ctx: &egui::Context) {
                     crate::select_other::close(app);
                 } else if app.tool.is_some() {
                     crate::tools::finish(app);
-                } else if app.dialog.is_some() {
+                } else if app.dialog.is_some() || app.pending_feature_edit.is_some() {
                     crate::dialogs::cancel(app);
                 } else if !app.session.selection.is_empty() || app.session.active_sketch.is_none() {
                     app.tree.picked_joints.clear();
@@ -2345,6 +2355,34 @@ mod header_report_tests {
         assert_eq!(got[0].0, "Plate.solidcraft");
         assert!(solidcraft_engine::io::is_design_container(&got[0].1));
         assert!(h.app.session.path.is_none(), "a download is no save: the design keeps no file");
+    }
+
+    /// Ctrl+Shift+S opens Save As in the design workspace (it never saves over the current file),
+    /// and the File menu shows that shortcut next to Save As (#6558).
+    #[test]
+    fn ctrl_shift_s_opens_save_as_in_the_workspace_and_the_file_menu_shows_the_shortcut() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.run("solid.box", json!({"length":2,"width":3,"height":4})).unwrap();
+        let source = h.dir.join("source.solidcraft");
+        h.app.run("file.save_as", json!({"path":source})).unwrap();
+        let bytes = std::fs::read(&source).unwrap();
+        h.app.session.doc_mut().name = "Copy".into();
+        h.frames(3);
+        h.step(&json!({"key":"S","cmd":true,"shift":true})).unwrap();
+        h.frames(3);
+        h.settle();
+        assert_eq!(
+            h.app.session.path.as_deref(),
+            h.dir.join("Copy.solidcraft").to_str(),
+            "Ctrl+Shift+S must open Save As, not save over the current file"
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), bytes, "Save As keeps the file the design came from");
+        // The File menu shows the shortcut of the command it runs.
+        let spec = solidcraft_engine::find_command("file.save_as").expect("file.save_as is a command");
+        assert_eq!(spec.shortcut, Some("Ctrl+Shift+S"), "the File menu shows the shortcut of Save As");
+        h.frames(3);
+        h.step(&json!({"click":{"handle":"appbar:file"}})).unwrap();
+        assert!(h.widget("Save As…").is_some(), "the File menu has a Save As row");
     }
 
     fn sizes(buttons: &[usize]) -> Vec<PanelSize> {

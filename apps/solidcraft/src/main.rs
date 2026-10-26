@@ -187,6 +187,10 @@ impl eframe::App for App {
         }
         solidcraft_ui_egui::recovery_ui::close(&mut self.solve);
         solidcraft_ui_egui::open_elsewhere::close(&mut self.solve);
+        // Before a restart below starts the next instance, which would otherwise get nothing from
+        // the 3D mouse driver (`solidcraft_3dx_client::stop`).
+        #[cfg(target_os = "macos")]
+        solidcraft_3dx_client::stop();
         solidcraft_engine::crash::end_session();
         // SolidCraft_Cloud: the designs this app had open are free for the others again.
         self.cloud.shutdown();
@@ -657,6 +661,18 @@ fn app_viewport(custom_titlebar: bool) -> Result<egui::ViewportBuilder, eframe::
 /// The window's app id: it names the desktop entry, so it is the packages' reverse-DNS id.
 const APP_ID: &str = solidcraft_engine::io::APP_ID;
 
+/// Disconnects from the 3D mouse driver when dropped, as `main` returns or a panic unwinds out
+/// of it (`solidcraft_3dx_client::stop`).
+#[cfg(target_os = "macos")]
+struct DriverClient;
+
+#[cfg(target_os = "macos")]
+impl Drop for DriverClient {
+    fn drop(&mut self) {
+        solidcraft_3dx_client::stop();
+    }
+}
+
 fn main() -> eframe::Result {
     #[cfg(target_os = "macos")]
     objc2_foundation::NSProcessInfo::processInfo().setProcessName(objc2_foundation::ns_string!("SolidCraft"));
@@ -720,6 +736,12 @@ fn main() -> eframe::Result {
     }
     if safe_mode {
         notes.push("Safe mode: default settings (yours are kept for the next normal start), no recovery offer, software rendering.".into());
+    }
+    let fallback_note = std::env::var(startup::FALLBACK_NOTE_ENV).ok().map(|s| s.chars().take(4096).collect::<String>());
+    if let Some(note) = &fallback_note {
+        log::warn!("{note}");
+        eprintln!("SolidCraft: {note}");
+        notes.push(note.clone());
     }
     let saved_samples = if safe_mode { None } else { msaa() };
     let wgpu_options = wgpu_options(cpu_renderer, if safe_mode { None } else { backend_preference() }.as_deref());
@@ -799,6 +821,10 @@ fn main() -> eframe::Result {
     let created = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let created_in_app = created.clone();
     let starting = settings.clone();
+    // A panic on the window's thread ends the app without `on_exit`; this disconnects from the
+    // 3D mouse driver then too.
+    #[cfg(target_os = "macos")]
+    let _driver_client = DriverClient;
     mark("run_native");
     let result = eframe::run_native(
         "SolidCraft",
@@ -830,6 +856,7 @@ fn main() -> eframe::Result {
             }
             app.integrated_titlebar = cfg!(target_os = "macos");
             app.cpu_meshing = safe_mode;
+            app.graphics_fallback = fallback_note.clone();
             if let Some(p) = cc.storage.and_then(|s| solidcraft_ui_egui::prefs::stored(|k| s.get_string(k))).filter(|_| !safe_mode) {
                 app.load_prefs(&p);
             }
@@ -963,7 +990,7 @@ fn main() -> eframe::Result {
     );
     control_server::remove_token_file();
     match result {
-        Err(e) if !created.load(std::sync::atomic::Ordering::SeqCst) => no_window(e, cpu_renderer, settings.as_deref()),
+        Err(e) if !created.load(std::sync::atomic::Ordering::SeqCst) => no_window(e, cpu_renderer, started, settings.as_deref()),
         r => r,
     }
 }
@@ -984,6 +1011,9 @@ fn wgpu_options(cpu: bool, preference: Option<&str>) -> eframe::egui_wgpu::WgpuC
     let mut options = eframe::egui_wgpu::WgpuConfiguration::default();
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup {
         let env_set = std::env::var(startup::WGPU_BACKEND_ENV).is_ok_and(|v| !v.trim().is_empty());
+        // A retry applies only to this launch. WGPU_BACKEND always has priority.
+        let retry = std::env::var(startup::RETRY_BACKEND_ENV).ok();
+        let preference = if cpu { preference } else { retry.as_deref().or(preference) };
         if let Some(backends) = startup::choose_backends(cfg!(target_os = "windows"), env_set, cpu, preference, startup::has_hardware_adapter) {
             eprintln!("SolidCraft graphics: starting {backends:?}");
             setup.instance_descriptor.backends = backends;
@@ -1005,24 +1035,47 @@ fn wgpu_options(cpu: bool, preference: Option<&str>) -> eframe::egui_wgpu::WgpuC
     options
 }
 
-/// The window never opened (no graphics adapter, a device that wouldn't start): once more on
-/// the software renderer, else a message box saying what failed instead of a silent exit.
-fn no_window(error: eframe::Error, tried_cpu: bool, settings: Option<&std::path::Path>) -> eframe::Result {
+/// A failed renderer returns here before app creation. A fresh process avoids reusing winit's
+/// event loop or a failed device; each retry advances through the APIs, then software once.
+fn no_window(error: eframe::Error, tried_cpu: bool, failed: eframe::wgpu::Backends, settings: Option<&std::path::Path>) -> eframe::Result {
     log::error!("the window could not open: {error}");
     eprintln!("SolidCraft: the window could not open: {error}");
-    if !tried_cpu && let Ok(exe) = std::env::current_exe() {
-        eprintln!("SolidCraft: trying again with the software renderer ({}=cpu)", startup::RENDERER_ENV);
-        match std::process::Command::new(exe).args(std::env::args_os().skip(1)).env(startup::RENDERER_ENV, "cpu").status() {
+    // This failure was handled, so neither the marker nor the journal should call it a crash.
+    if let Some(dir) = settings {
+        startup::started(dir);
+    }
+    solidcraft_engine::crash::end_session();
+    let explicit = std::env::var(startup::WGPU_BACKEND_ENV).is_ok_and(|v| !v.trim().is_empty());
+    if let Some(next) = startup::fallback_backend(cfg!(target_os = "windows"), explicit, tried_cpu, failed)
+        && let Ok(exe) = std::env::current_exe()
+    {
+        let previous = std::env::var(startup::FALLBACK_NOTE_ENV).unwrap_or_default();
+        let note = startup::fallback_note(&previous, failed, next, &error.to_string());
+        log::warn!("{note}");
+        eprintln!("SolidCraft: {note}");
+        let mut command = std::process::Command::new(exe);
+        command.args(std::env::args_os().skip(1)).env(startup::FALLBACK_NOTE_ENV, note);
+        if next == "cpu" {
+            command.env(startup::RENDERER_ENV, "cpu").env_remove(startup::RETRY_BACKEND_ENV);
+        } else {
+            command.env(startup::RETRY_BACKEND_ENV, next);
+        }
+        match command.status() {
             Ok(status) if status.success() => return Ok(()),
-            // The second try showed its own message.
+            // The final try showed its own message.
             Ok(_) => return Err(error),
-            Err(e) => log::error!("could not start again with the software renderer: {e}"),
+            Err(e) => log::error!("could not start again on {next}: {e}"),
         }
     }
+    let message = if explicit {
+        format!("SolidCraft could not open its window with WGPU_BACKEND.\n\n{error}\n\nChange or remove WGPU_BACKEND to try another graphics API.")
+    } else {
+        startup::no_window_message(&error.to_string(), settings)
+    };
     let _ = rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Error)
         .set_title("SolidCraft could not start")
-        .set_description(startup::no_window_message(&error.to_string(), settings))
+        .set_description(message)
         .set_buttons(rfd::MessageButtons::Ok)
         .show();
     Err(error)

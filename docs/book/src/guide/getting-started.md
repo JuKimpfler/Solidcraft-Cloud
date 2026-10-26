@@ -24,6 +24,16 @@ cargo run --release -p solidcraft -- --sample   # opens with a sample part
 
 Open the release `.dmg` and drag `SolidCraft.app` onto Applications.
 
+The macOS build is signed ad-hoc and not notarized, so macOS blocks the first launch with
+"SolidCraft can't be opened, because Apple can't verify if the app is vulnerable". Open
+**System Settings › Privacy & Security**, scroll down to the message about SolidCraft, click
+**Open Anyway** and confirm: the app opens normally from then on. From a terminal, remove the
+quarantine flag instead:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/SolidCraft.app
+```
+
 When updating from a build released under the previous product name, follow the
 [macOS upgrade notes](https://github.com/bherbruck/solidcraft/blob/main/docs/compatibility.md#macos) so you replace it rather than install a second copy.
 
@@ -127,8 +137,18 @@ Use `?open=<encoded HTTPS URL>` to open a hosted `.solidcraft` design as an unsa
 copy, including its history, constraints, and joints. Encode the URL with
 `encodeURIComponent` when it contains query parameters. The host must allow CORS
 requests from the app's origin. Downloads, including redirected URLs, must use HTTPS
-and fit within the File > Open design size limit. Failed downloads and invalid designs
-show an error and leave the empty design.
+or stay on the app's own origin, and fit within the File > Open design size limit.
+Failed downloads and invalid designs show an error and leave the empty design.
+
+For self-hosting, `?open=/dutchman/jobs/abc/part.solidcraft` resolves against the
+page's origin, using its scheme and port, including plain HTTP on a LAN. A full URL
+on that same origin is also accepted; other absolute URLs still require HTTPS.
+For example, expose a reverse-proxy service in Compose, routing `/` to
+`solidcraft:8080` and `/dutchman/` to a converter service. The converter can link to
+`/?open=/dutchman/jobs/abc/part.solidcraft` without a separate origin or CORS setup.
+Paths must start with one `/`; protocol-relative paths (`//`), backslashes, control
+characters, and decoded `..` segments are refused. Redirects must end at HTTPS or
+the page's own origin. Embed mode and **Open in SolidCraft** preserve the path.
 
 Add `embed` to show the viewport, timeline, browser tree, and joint controls without
 the ribbon, file menus, or start page:
