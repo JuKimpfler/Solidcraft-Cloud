@@ -13,6 +13,7 @@ pub mod capture;
 pub mod cmd;
 pub mod control_auth;
 pub mod control_pending;
+pub mod cosmetic_threads;
 pub mod crash;
 pub mod frames;
 pub mod fuzz;
@@ -113,9 +114,12 @@ pub enum Sel {
     Feature {
         id: u64,
     },
-    /// A sketch curve or point (by id) of the active sketch.
+    /// A sketch curve or point (by id) of the active sketch. A curve picked into a dialog also
+    /// names its `sketch`: curve ids repeat from one sketch to the next (#3726).
     SketchCurve {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sketch: Option<u64>,
     },
     SketchPoint {
         id: String,
@@ -144,6 +148,10 @@ pub enum Sel {
     },
     /// An origin plane (XY, XZ, YZ) or a construction plane (by feature name).
     Plane {
+        name: String,
+    },
+    /// A construction point, by feature name.
+    ConstructionPoint {
         name: String,
     },
     /// An origin axis (X, Y, Z) or a construction axis (by feature name).
@@ -323,6 +331,8 @@ pub struct Session {
     pub section: Option<(Vec3, Vec3)>,
     /// Whether the section's cut faces are hatched (`inspect.section`'s `hatch`; on by default).
     pub section_hatch: bool,
+    /// Component identification colours are enabled when present; view state only.
+    pub colored_components: Option<()>,
     /// Surface analysis shading the model (zebra, draft, curvature map).
     pub analysis: Option<SurfaceAnalysis>,
     /// The seams `inspect.continuity` last measured, for the viewport to shade. View state: not
@@ -487,6 +497,7 @@ impl Session {
             sketch_clipboard: None,
             section: None,
             section_hatch: true,
+            colored_components: None,
             analysis: None,
             continuity: Vec::new(),
             checkpoints: Vec::new(),
@@ -884,7 +895,9 @@ impl Session {
             .features
             .iter()
             .filter_map(|feature| match &feature.kind {
-                solidcraft_doc::FeatureKind::Sketch { sketch, .. } if sketch.patterns.iter().any(|p| p.count_expression.is_some()) => {
+                solidcraft_doc::FeatureKind::Sketch { sketch, .. }
+                    if sketch.patterns.iter().any(|p| p.count_expression.is_some() || !p.expressions.is_empty()) =>
+                {
                     Some((feature.id, sketch.clone()))
                 }
                 _ => None,
@@ -893,7 +906,7 @@ impl Session {
         if !updated.is_empty() {
             let (vals, _) = self.doc.param_values();
             for (_, sketch) in &mut updated {
-                self.doc.apply_pattern_quantities(&vals, sketch)?;
+                self.doc.apply_pattern_values(&vals, sketch)?;
             }
         }
         for (id, sketch) in updated {
@@ -1148,6 +1161,7 @@ impl Session {
             sketch_clipboard: self.sketch_clipboard.clone(),
             section: None,
             section_hatch: true,
+            colored_components: None,
             analysis: None,
             continuity: Vec::new(),
             checkpoints: Vec::new(),
@@ -1397,11 +1411,18 @@ pub(crate) type SketchValues = std::collections::BTreeMap<u64, std::collections:
 fn own_values(sk: &solidcraft_sketch::Sketch) -> std::collections::BTreeMap<String, f64> {
     let mut values: std::collections::BTreeMap<_, _> =
         sk.constraints.iter().filter(|c| c.param.is_some() && !c.driven).filter_map(|c| Some((c.id.clone(), c.kind.value()?))).collect();
-    for pattern in &sk.patterns {
-        if pattern.count_expression.is_some()
-            && let solidcraft_sketch::SketchPatternKind::Circular { count, .. } = pattern.kind
-        {
-            values.insert(format!("pattern:{}:count", pattern.id), count as f64);
+    for p in &sk.patterns {
+        use solidcraft_sketch::SketchPatternKind;
+        let inputs = match p.kind {
+            SketchPatternKind::Circular { count, angle, .. } => vec![("count", count as f64), ("angle", angle)],
+            SketchPatternKind::Rectangular { count, spacing, count2, spacing2, .. } => {
+                vec![("count", count as f64), ("spacing", spacing), ("count2", count2 as f64), ("spacing2", spacing2)]
+            }
+        };
+        for (key, value) in inputs {
+            if p.expressions.contains_key(key) || (key == "count" && p.count_expression.is_some()) {
+                values.insert(format!("{}.{}", p.id, key), value);
+            }
         }
     }
     values
@@ -1428,6 +1449,7 @@ fn same_but_features(a: &Document, b: &Document) -> bool {
         units,
         metadata,
         params,
+        text_params,
         features: _,
         marker,
         next_id,
@@ -1453,6 +1475,7 @@ fn same_but_features(a: &Document, b: &Document) -> bool {
         browser_order,
         named_views,
         visibility,
+        next_component_color_index,
     } = a;
     *render == b.render
         && *format == b.format
@@ -1461,6 +1484,7 @@ fn same_but_features(a: &Document, b: &Document) -> bool {
         && *units == b.units
         && *metadata == b.metadata
         && *params == b.params
+        && *text_params == b.text_params
         && *marker == b.marker
         && *next_id == b.next_id
         && *reserved_body_names == b.reserved_body_names
@@ -1485,4 +1509,5 @@ fn same_but_features(a: &Document, b: &Document) -> bool {
         && *browser_order == b.browser_order
         && *named_views == b.named_views
         && *visibility == b.visibility
+        && *next_component_color_index == b.next_component_color_index
 }

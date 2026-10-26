@@ -37,6 +37,11 @@ started it (and removes the entry SolidCraft added before). To
 turn it off for good, create an empty file `~/.local/share/solidcraft/no-desktop-integration`, or
 start the AppImage with `SOLIDCRAFT_NO_DESKTOP_INTEGRATION=1`.
 
+If the AppImage doesn't start and prints a FUSE message followed by `execv error: No such file
+or directory`, AppImageLauncher 2.x is intercepting it: it can't start AppImages built on the
+static runtime, as SolidCraft's is. Update AppImageLauncher to 3.0 (so far only published as
+betas; 3.0.0-beta-3 or newer works), or remove it.
+
 ### Linux Flatpak
 
 Install Flatpak using your distribution's package manager. For an installation that receives
@@ -115,6 +120,27 @@ cd apps/solidcraft-web && trunk serve --release --no-autoreload
 
 Offline use needs `--no-autoreload`: Trunk's live reload changes the page as it serves it, so it
 no longer matches the build the browser would keep. Debug builds (`trunk serve`) never keep a copy.
+
+### Design links and embeds
+
+Use `?open=<encoded HTTPS URL>` to open a hosted `.solidcraft` design as an unsaved
+copy, including its history, constraints, and joints. Encode the URL with
+`encodeURIComponent` when it contains query parameters. The host must allow CORS
+requests from the app's origin. Downloads, including redirected URLs, must use HTTPS
+and fit within the File > Open design size limit. Failed downloads and invalid designs
+show an error and leave the empty design.
+
+Add `embed` to show the viewport, timeline, browser tree, and joint controls without
+the ribbon, file menus, or start page:
+
+```html
+<iframe src="https://docs.solidcraft.io/app/?embed&open=https://example.org/arm.solidcraft"
+        width="960" height="540" title="Arm design"></iframe>
+```
+
+Embedded designs do not save designs, preferences, or recovery copies to browser
+storage and do not ask before unloading. **Open in SolidCraft** opens the same link
+in the full app in a new tab. `?embed` without `open` keeps the normal app layout.
 
 ### Self-hosting with Docker
 

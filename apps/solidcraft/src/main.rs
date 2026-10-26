@@ -117,6 +117,10 @@ impl eframe::App for App {
                 // A DMG install has no installer step: put solidcraft-cli on PATH, quietly.
                 #[cfg(target_os = "macos")]
                 std::thread::spawn(solidcraft_ui_egui::cli_link::install_on_launch);
+                // Automation runs (a control port was asked for) leave the user's AI apps alone.
+                if !self.take_focus_unwanted {
+                    solidcraft_ui_egui::ai_connect::begin(&mut self.solve);
+                }
                 if let Some(dir) = self.starting.take() {
                     startup::started(&dir);
                 }
@@ -295,7 +299,9 @@ fn services(cc: &eframe::CreationContext<'_>) -> (Services, std::rc::Rc<cloud::C
                 dialog = dialog.add_filter(label, &case_variants(first));
             }
             // The groups come from the format registry, so a new format joins this dialog by itself.
-            dialog = dialog.add_filter("Designs, CAD files and meshes", &case_variants(&io::formats::open_extensions(true)));
+            let mut everything = io::formats::open_extensions(true);
+            everything.extend(["dxf", "svg"]);
+            dialog = dialog.add_filter(solidcraft_ui_egui::i18n::tr("file.open.drawing_filter"), &case_variants(&everything));
             for (label, exts) in io::formats::import_filters(true) {
                 dialog = dialog.add_filter(label, &case_variants(&exts));
             }
@@ -338,6 +344,7 @@ fn services(cc: &eframe::CreationContext<'_>) -> (Services, std::rc::Rc<cloud::C
             let future = dialog.save_file();
             Box::pin(async move { future.await.map(|p| p.path().to_string_lossy().into_owned()) })
         })),
+        graphics_adapters: Vec::new(),
         graphics_path: graphics_path().map(|p| p.to_string_lossy().to_string()),
         window_system: window_system_now(),
         http_get: Some(std::sync::Arc::new(http_get)),
@@ -595,13 +602,22 @@ fn scene_samples(backend: eframe::wgpu::Backend, samples: u32, supported: &[u32]
     }
 }
 
-/// Anti-aliasing samples from Preferences (4 when unset).
-fn msaa() -> u16 {
+/// Keep the default until the installed renderer's startup check proves a fallback is needed.
+fn scene_msaa_request(saved: Option<u16>) -> u16 {
+    saved.unwrap_or(MSAA)
+}
+
+/// Query the scene's colour/depth intersection, rather than the depthless window's counts.
+fn scene_sample_choices(depth_bits: u8, stencil_bits: u8, query: impl FnOnce(Option<eframe::wgpu::TextureFormat>) -> Vec<u32>) -> Vec<u32> {
+    query(eframe::egui_wgpu::depth_format_from_bits(depth_bits, stencil_bits))
+}
+
+/// An explicitly saved anti-aliasing choice, absent until Graphics changes it.
+fn msaa() -> Option<u16> {
     graphics()
         .and_then(|v| v.get("msaa").and_then(serde_json::Value::as_u64))
         .and_then(|m| u16::try_from(m).ok())
         .filter(|m| [1, 2, 4, 8].contains(m))
-        .unwrap_or(MSAA)
 }
 
 /// Windows and Linux: no OS title bar; the application bar is the title bar
@@ -705,7 +721,7 @@ fn main() -> eframe::Result {
     if safe_mode {
         notes.push("Safe mode: default settings (yours are kept for the next normal start), no recovery offer, software rendering.".into());
     }
-    let samples = if safe_mode { MSAA } else { msaa() };
+    let saved_samples = if safe_mode { None } else { msaa() };
     let wgpu_options = wgpu_options(cpu_renderer, if safe_mode { None } else { backend_preference() }.as_deref());
     let depth_bits = if !safe_mode && startup::float_depth_everywhere(&wgpu_options) { FLOAT_DEPTH_BITS } else { DEPTH_BITS };
     // Crashes leave a report in the crash folder (solidcraft_engine::crash, docs/crash-reports.md).
@@ -823,19 +839,37 @@ fn main() -> eframe::Result {
                 restart_on_software: device_lost::restart_on_software(after_loss, cpu_renderer),
                 lost_at: None,
             });
+            if !safe_mode {
+                app.preferences.graphics_adapter =
+                    graphics().and_then(|v| v.get("adapter").and_then(serde_json::Value::as_str).map(str::to_string)).unwrap_or_default();
+            }
             if let Some(rs) = &cc.wgpu_render_state {
-                let scene_samples = scene_samples(rs.adapter.get_info().backend, u32::from(samples), &rs.msaa_supported);
+                app.services.graphics_adapters = rs
+                    .available_adapters
+                    .iter()
+                    .map(|adapter| {
+                        let info = adapter.get_info();
+                        (info.name.clone(), format!("{} ({:?}, {:?})", info.name, info.device_type, info.backend))
+                    })
+                    .collect();
+                let info = rs.adapter.get_info();
+                let samples = scene_msaa_request(saved_samples);
+                let supported = scene_sample_choices(depth_bits, STENCIL_BITS, |depth| {
+                    eframe::egui_wgpu::supported_msaa_samples(&rs.adapter, &rs.device, rs.target_format, depth)
+                });
+                let scene_samples = scene_samples(info.backend, u32::from(samples), &supported);
                 eprintln!("SolidCraft graphics: {:?}, MSAA {scene_samples}x (requested {}x)", rs.adapter.get_info().backend, samples);
                 solidcraft_engine::crash::phase("viewport pipelines (shader compile)");
-                app.set_wgpu_split(rs, depth_bits, STENCIL_BITS, scene_samples);
+                let scene_samples = app.set_wgpu_split(rs, depth_bits, STENCIL_BITS, scene_samples);
+                app.msaa_supported = supported;
+                app.preferences.msaa = u32::from(samples);
                 solidcraft_ui_egui::gpu::install_picture_renderer(rs);
                 // The graphics driver is loaded now; it may have put its own exception filter
                 // in front of ours.
                 #[cfg(target_os = "windows")]
                 native_crash::reinstall();
-                // A saved anti-aliasing the device can't do: back to the default, with a notice.
+                // Reflect a confirmed probe fallback or an unsupported saved count in Graphics.
                 solidcraft_ui_egui::prefs::check_msaa(&mut app, u32::from(samples));
-                let info = rs.adapter.get_info();
                 solidcraft_engine::crash::set_environment(&format!(
                     "Renderer: {:?} {} ({}), MSAA {scene_samples}x",
                     info.backend, info.name, info.driver
@@ -957,9 +991,9 @@ fn wgpu_options(cpu: bool, preference: Option<&str>) -> eframe::egui_wgpu::WgpuC
         let intel_mac = cfg!(all(target_os = "macos", target_arch = "x86_64"));
         let indirect = std::env::var(startup::INDIRECT_VALIDATION_ENV).ok();
         setup.instance_descriptor.flags = startup::window_instance_flags(setup.instance_descriptor.flags, intel_mac, indirect.as_deref());
-        if cpu {
-            setup.native_adapter_selector = Some(std::sync::Arc::new(startup::pick_cpu_adapter));
-        }
+        let environment = std::env::var("WGPU_ADAPTER_NAME").ok();
+        let adapter = graphics().and_then(|v| v.get("adapter").and_then(serde_json::Value::as_str).map(str::to_string));
+        startup::configure_adapter(setup, cpu, environment, adapter);
         // A float depth buffer with a stencil, wherever the adapter has it (see `FLOAT_DEPTH_BITS`).
         let base = setup.device_descriptor.clone();
         setup.device_descriptor = std::sync::Arc::new(move |adapter| {
@@ -1206,6 +1240,34 @@ mod msaa_tests {
             for backend in [Backend::Vulkan, Backend::Dx12, Backend::Metal] {
                 assert_eq!(eframe::egui_wgpu::effective_msaa_samples(backend, requested), requested);
             }
+        }
+    }
+
+    #[test]
+    fn scene_sample_choices_include_the_scene_depth_format() {
+        use eframe::wgpu::TextureFormat;
+        for (bits, expected) in [(24, TextureFormat::Depth24PlusStencil8), (32, TextureFormat::Depth32FloatStencil8)] {
+            // A synthetic colour target supports 8x, but the scene depth supports only 1x/4x.
+            let supported = super::scene_sample_choices(bits, 8, |depth| match depth {
+                Some(format) if format == expected => vec![1, 4],
+                None => vec![1, 4, 8],
+                other => panic!("unexpected scene depth: {other:?}"),
+            });
+            assert_eq!(supported, [1, 4]);
+            assert_eq!(super::scene_samples(eframe::wgpu::Backend::Dx12, 8, &supported), 4);
+        }
+    }
+
+    #[test]
+    fn scene_msaa_keeps_four_samples_by_default_and_explicit_choices() {
+        use eframe::wgpu::Backend;
+        let default = super::scene_msaa_request(None);
+        assert_eq!(default, 4);
+        for backend in [Backend::Dx12, Backend::Vulkan, Backend::Metal] {
+            assert_eq!(super::scene_samples(backend, u32::from(default), &[1, 4]), 4);
+        }
+        for saved in [1, 2, 4, 8] {
+            assert_eq!(super::scene_msaa_request(Some(saved)), saved);
         }
     }
 

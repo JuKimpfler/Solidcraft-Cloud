@@ -429,18 +429,42 @@ fn insert_member(text: &mut String, obj: &Obj, key: &str, value: &Value) {
     }
 }
 
+/// Delete member `i` of `obj` from the text, with its comma.
+fn remove_member(text: &mut String, obj: &Obj, i: usize) {
+    let Some(m) = obj.members.get(i) else { return };
+    if let Some(next) = obj.members.get(i + 1) {
+        text.replace_range(m.key_at..next.key_at, "");
+    } else if i > 0
+        && let Some(prev) = obj.members.get(i - 1)
+    {
+        text.replace_range(prev.val.1..m.val.1, "");
+    } else {
+        text.replace_range(obj.open + 1..obj.close, "");
+    }
+}
+
 /// What happened to one server entry.
 #[derive(Debug, PartialEq)]
 enum Change {
     Added,
     Updated,
     Unchanged,
+    /// Taken out (a SolidCraft entry of ours).
+    Removed,
     /// Not touched, because the user's own entry is there.
     Custom,
 }
 
+/// What a run does with the entries.
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Add,
+    /// Take out the entries setup wrote (the user's own are left).
+    Remove,
+}
+
 /// Set the entries in the JSON text, in the object under the top-level `list_key`.
-fn edit_json(text: &mut String, shape: Shape, exe: &str, live: bool) -> Result<Vec<(&'static str, Change)>, String> {
+fn edit_json(text: &mut String, shape: Shape, exe: &str, live: bool, mode: Mode) -> Result<Vec<(&'static str, Change)>, String> {
     let mut out = Vec::new();
     let key = shape.list_key();
     if text.trim().is_empty() {
@@ -451,6 +475,7 @@ fn edit_json(text: &mut String, shape: Shape, exe: &str, live: bool) -> Result<V
     let list_open = match root.members.iter().find(|m| m.key == key) {
         Some(m) if text.as_bytes().get(m.val.0) == Some(&b'{') => m.val.0,
         Some(_) => return Err(format!("`{key}` is not a JSON object")),
+        None if mode == Mode::Remove => return Ok(Vec::new()),
         None => {
             insert_member(text, &root, key, &json!({}));
             let root = root_object(text)?;
@@ -468,6 +493,12 @@ fn edit_json(text: &mut String, shape: Shape, exe: &str, live: bool) -> Result<V
             _ => judge(parsed.as_ref(), exe, &args),
         };
         let change = match (verdict, existing) {
+            (Verdict::Add, _) if mode == Mode::Remove => continue,
+            (Verdict::Same | Verdict::Stale, Some(_)) if mode == Mode::Remove => {
+                let at = obj.members.iter().position(|m| m.key == name).unwrap_or(0);
+                remove_member(text, &obj, at);
+                Change::Removed
+            }
             (Verdict::Add, _) => {
                 insert_member(text, &obj, name, &new);
                 Change::Added
@@ -492,7 +523,7 @@ fn edit_json(text: &mut String, shape: Shape, exe: &str, live: bool) -> Result<V
 // ---------------------------------------------------------------------------------------------
 // Editing Codex's TOML in place.
 
-fn edit_toml(text: &mut String, exe: &str, live: bool) -> Result<Vec<(&'static str, Change)>, String> {
+fn edit_toml(text: &mut String, exe: &str, live: bool, mode: Mode) -> Result<Vec<(&'static str, Change)>, String> {
     use toml_edit::{Array, DocumentMut, Item, Table, value};
     let mut doc: DocumentMut = text.parse().map_err(|e: toml_edit::TomlError| e.to_string())?;
     let mut out = Vec::new();
@@ -513,6 +544,13 @@ fn edit_toml(text: &mut String, exe: &str, live: bool) -> Result<Vec<(&'static s
             None => None,
         };
         let change = match judge(existing.as_ref(), exe, &args) {
+            Verdict::Add if mode == Mode::Remove => continue,
+            Verdict::Same | Verdict::Stale if mode == Mode::Remove => {
+                if let Some(t) = doc.get_mut("mcp_servers").and_then(Item::as_table_mut) {
+                    t.remove(name);
+                }
+                Change::Removed
+            }
             Verdict::Add => {
                 let mut t = Table::new();
                 t["command"] = value(exe);
@@ -566,7 +604,7 @@ fn toml_to_json(t: &toml_edit::Table) -> Value {
 // ---------------------------------------------------------------------------------------------
 
 /// One client's outcome, a line of the report.
-fn configure_file(t: &Target, exe: &str, live: bool, dry_run: bool) -> Result<String, String> {
+fn configure_file(t: &Target, exe: &str, live: bool, dry_run: bool, mode: Mode) -> Result<(String, Vec<(&'static str, Change)>), String> {
     let fail = |e: String| format!("{}: {e}; left unchanged", t.file.display());
     let existing = match std::fs::read_to_string(&t.file) {
         Ok(s) => Some(s),
@@ -574,33 +612,39 @@ fn configure_file(t: &Target, exe: &str, live: bool, dry_run: bool) -> Result<St
         Err(e) => return Err(format!("{}: {e}", t.file.display())),
     };
     let mut text = existing.clone().unwrap_or_default();
-    let changes = if t.shape == Shape::Codex { edit_toml(&mut text, exe, live) } else { edit_json(&mut text, t.shape, exe, live) }.map_err(fail)?;
+    let changes =
+        if t.shape == Shape::Codex { edit_toml(&mut text, exe, live, mode) } else { edit_json(&mut text, t.shape, exe, live, mode) }.map_err(fail)?;
     let said: Vec<String> = changes
         .iter()
         .map(|(name, c)| match c {
             Change::Added => format!("added {name}"),
             Change::Updated => format!("updated the path of {name}"),
             Change::Unchanged => format!("{name} already set up"),
+            Change::Removed => format!("removed {name}"),
             Change::Custom => format!("{name} left as you have it (it is not a plain SolidCraft entry)"),
         })
         .collect();
     let said = said.join(", ");
     let changed = existing.as_deref() != Some(text.as_str());
+    let done = |m: String| Ok((m, changes));
     if dry_run {
-        return Ok(if changed { format!("would write {} ({said}):\n{text}", t.file.display()) } else { format!("no change needed ({said})") });
+        return done(if changed { format!("would write {} ({said}):\n{text}", t.file.display()) } else { format!("no change needed ({said})") });
     }
     if !changed {
-        return Ok(said);
+        return done(said);
     }
     if existing.is_some() {
         let mut bak = t.file.clone().into_os_string();
         bak.push(".bak");
-        std::fs::copy(&t.file, &bak).map_err(|e| format!("{}: cannot back up: {e}", t.file.display()))?;
+        // The first backup is the user's original: later runs keep it.
+        if !Path::new(&bak).exists() {
+            std::fs::copy(&t.file, &bak).map_err(|e| format!("{}: cannot back up: {e}", t.file.display()))?;
+        }
     } else if let Some(dir) = t.file.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     std::fs::write(&t.file, text).map_err(|e| format!("{}: {e}", t.file.display()))?;
-    Ok(format!("{said} ({})", t.file.display()))
+    done(format!("{said} ({})", t.file.display()))
 }
 
 /// Set up every detected client (or `--client NAME`; flags `--dry-run`, `--live`) for the
@@ -627,8 +671,8 @@ pub fn setup(args: &[String], env: &Env, exe: &str) -> Result<(Vec<String>, bool
     let mut lines = Vec::new();
     let mut ok = true;
     for t in detect(env, only) {
-        match configure_file(&t, exe, live, dry_run) {
-            Ok(m) => lines.push(format!("{}: {m}", t.client)),
+        match configure_file(&t, exe, live, dry_run, Mode::Add) {
+            Ok((m, _)) => lines.push(format!("{}: {m}", t.client)),
             Err(e) => {
                 ok = false;
                 lines.push(format!("{}: failed: {e}", t.client));
@@ -644,6 +688,33 @@ pub fn setup(args: &[String], env: &Env, exe: &str) -> Result<(Vec<String>, bool
     Ok((lines, ok))
 }
 
+/// What a quiet run did: the clients that got a new entry, and the ones that took one out.
+#[derive(Debug, Default, PartialEq)]
+pub struct Quiet {
+    pub added: Vec<&'static str>,
+    pub removed: Vec<&'static str>,
+}
+
+/// Make `solidcraft-cli` at `exe` available to every installed client (`Mode::Add`), or take
+/// the entries setup wrote out of them again (`remove`). Quiet and best effort, for the app: a
+/// client that fails is skipped. The rules for the user's own entries are the same as `setup`'s.
+pub fn quiet(env: &Env, exe: &str, remove: bool) -> Quiet {
+    let mode = if remove { Mode::Remove } else { Mode::Add };
+    let mut q = Quiet::default();
+    for t in detect(env, None) {
+        // Adding writes `solidcraft` only (plain `mcp` finds the app by itself); removing also
+        // takes out a `solidcraft-live` that is ours.
+        let Ok((_, changes)) = configure_file(&t, exe, remove, false, mode) else { continue };
+        if changes.iter().any(|(n, c)| *n == "solidcraft" && *c == Change::Added) {
+            q.added.push(t.client);
+        }
+        if changes.iter().any(|(_, c)| *c == Change::Removed) {
+            q.removed.push(t.client);
+        }
+    }
+    q
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,7 +723,7 @@ mod tests {
 
     fn edit(text: &str, shape: Shape) -> (String, Vec<(&'static str, Change)>) {
         let mut t = text.to_owned();
-        let c = edit_json(&mut t, shape, EXE, false).unwrap();
+        let c = edit_json(&mut t, shape, EXE, false, Mode::Add).unwrap();
         (t, c)
     }
 
@@ -721,7 +792,7 @@ mod tests {
     #[test]
     fn broken_json_is_an_error() {
         for bad in ["[1]", "{\"a\": ", "{\"a\": 1} x", "{\"mcpServers\": 3}"] {
-            assert!(edit_json(&mut bad.to_owned(), Shape::McpServers, EXE, false).is_err(), "{bad}");
+            assert!(edit_json(&mut bad.to_owned(), Shape::McpServers, EXE, false, Mode::Add).is_err(), "{bad}");
         }
     }
 
@@ -729,21 +800,68 @@ mod tests {
     fn codex_toml_keeps_comments_and_other_tables() {
         let src = "# my codex\nmodel = \"x\"\n\n[mcp_servers.other]\ncommand = \"o\" # mine\n";
         let mut t = src.to_owned();
-        let c = edit_toml(&mut t, EXE, true).unwrap();
+        let c = edit_toml(&mut t, EXE, true, Mode::Add).unwrap();
         assert_eq!(c, [("solidcraft", Change::Added), ("solidcraft-live", Change::Added)]);
         assert!(t.starts_with(src), "{t}");
         assert!(t.contains("[mcp_servers.solidcraft]") && t.contains(&format!("command = \"{EXE}\"")), "{t}");
         // Stale path, then a user-changed entry.
         let mut stale = "[mcp_servers.solidcraft]\ncommand = \"/old/solidcraft-cli\"\nargs = [\"mcp\"]\nstartup_timeout_sec = 30\n".to_owned();
-        assert_eq!(edit_toml(&mut stale, EXE, false).unwrap(), [("solidcraft", Change::Updated)]);
+        assert_eq!(edit_toml(&mut stale, EXE, false, Mode::Add).unwrap(), [("solidcraft", Change::Updated)]);
         assert!(stale.contains("startup_timeout_sec = 30") && stale.contains(EXE), "{stale}");
         let mut custom = "[mcp_servers.solidcraft]\ncommand = \"/x/solidcraft-cli\"\nargs = [\"mcp\", \"--headless\"]\n".to_owned();
         let before = custom.clone();
-        assert_eq!(edit_toml(&mut custom, EXE, false).unwrap(), [("solidcraft", Change::Custom)]);
+        assert_eq!(edit_toml(&mut custom, EXE, false, Mode::Add).unwrap(), [("solidcraft", Change::Custom)]);
         assert_eq!(custom, before);
         // An empty file works too.
         let mut empty = String::new();
-        edit_toml(&mut empty, EXE, false).unwrap();
+        edit_toml(&mut empty, EXE, false, Mode::Add).unwrap();
         assert!(empty.contains("[mcp_servers.solidcraft]"), "{empty}");
+    }
+
+    #[test]
+    fn removing_takes_out_only_our_entries_and_keeps_the_rest() {
+        let src = "{\n  \"mcpServers\": {\n    \"a\": {\"command\": \"x\"},\n    \"solidcraft\": {\"command\": \"/old/solidcraft-cli\", \"args\": [\"mcp\"]},\n    \"solidcraft-live\": {\"command\": \"/old/solidcraft-cli\", \"args\": [\"mcp\", \"--connect\", \"127.0.0.1:7878\"]}\n  },\n  \"k\": 1\n}\n";
+        let mut t = src.to_owned();
+        let c = edit_json(&mut t, Shape::McpServers, EXE, true, Mode::Remove).unwrap();
+        assert_eq!(c, [("solidcraft", Change::Removed), ("solidcraft-live", Change::Removed)]);
+        let v: Value = serde_json::from_str(&t).unwrap();
+        assert_eq!(v, json!({"mcpServers": {"a": {"command": "x"}}, "k": 1}));
+        // The user's own entry stays.
+        let mut mine = r#"{"mcpServers": {"solidcraft": {"command": "node", "args": ["mcp"]}}}"#.to_owned();
+        let before = mine.clone();
+        assert_eq!(edit_json(&mut mine, Shape::McpServers, EXE, true, Mode::Remove).unwrap(), [("solidcraft", Change::Custom)]);
+        assert_eq!(mine.trim_end(), before);
+        // Nothing there: nothing happens, no list is created.
+        let mut none = "{\"k\": 1}".to_owned();
+        assert!(edit_json(&mut none, Shape::McpServers, EXE, true, Mode::Remove).unwrap().is_empty());
+        assert_eq!(none.trim_end(), "{\"k\": 1}");
+        // TOML.
+        let mut toml =
+            "[mcp_servers.other]\ncommand = \"o\"\n\n[mcp_servers.solidcraft]\ncommand = \"/old/solidcraft-cli\"\nargs = [\"mcp\"]\n".to_owned();
+        assert_eq!(edit_toml(&mut toml, EXE, false, Mode::Remove).unwrap(), [("solidcraft", Change::Removed)]);
+        assert!(toml.contains("[mcp_servers.other]") && !toml.contains("solidcraft"), "{toml}");
+    }
+
+    #[test]
+    fn quiet_adds_only_the_plain_entry_and_names_new_clients_once() {
+        let h = std::env::temp_dir().join(format!("solidcraft-quiet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&h);
+        std::fs::create_dir_all(h.join(".cursor")).unwrap();
+        std::fs::create_dir_all(h.join(".gemini")).unwrap();
+        let env = Env { home: Some(h.clone()), appdata: None, local_appdata: None, xdg_config: Some(h.join("xdg")), codex_home: None };
+        let q = quiet(&env, EXE, false);
+        assert_eq!(q.added, ["cursor", "gemini"]);
+        let t = std::fs::read_to_string(h.join(".cursor/mcp.json")).unwrap();
+        assert!(t.contains("\"solidcraft\"") && !t.contains("solidcraft-live"), "{t}");
+        // A second run changes nothing and names nobody.
+        assert_eq!(quiet(&env, EXE, false), Quiet::default());
+        // An old path is refreshed without being called new.
+        std::fs::write(h.join(".cursor/mcp.json"), t.replace(EXE, "/gone/solidcraft-cli")).unwrap();
+        assert_eq!(quiet(&env, EXE, false), Quiet::default());
+        assert!(std::fs::read_to_string(h.join(".cursor/mcp.json")).unwrap().contains(EXE));
+        // Turning it off takes the entries out again.
+        assert_eq!(quiet(&env, EXE, true).removed, ["cursor", "gemini"]);
+        assert!(!std::fs::read_to_string(h.join(".cursor/mcp.json")).unwrap().contains("solidcraft"));
+        let _ = std::fs::remove_dir_all(&h);
     }
 }
