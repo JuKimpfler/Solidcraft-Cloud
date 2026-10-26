@@ -287,13 +287,14 @@ pub fn request_scope(app: &SolveApp, params: &Value) -> Result<Option<vfs::PathS
 /// mode, the section the viewport shows: an open Section Analysis dialog's preview, a sketch's
 /// Slice), with the grid and the origin's axes as `guides` says.
 pub(crate) fn view_scene(app: &SolveApp, guides: solidcraft_engine::view::Guides) -> solidcraft_engine::render::Scene {
-    let mut scene = solidcraft_engine::view::scene_with_palette_and_guides(
+    let mut scene = solidcraft_engine::view::scene_with_thread_markings(
         &app.session,
         &app.cam,
         crate::viewport::section_plane(app),
         solidcraft_engine::view::world_curve_parts,
-        &crate::viewport::scene_palette(app.ui.dark, app.preferences.color_vision),
+        &crate::viewport::scene_palette(app.viewport_dark(), app.preferences.color_vision),
         guides,
+        app.preferences.cosmetic_threads,
     );
     scene.plain_cap = !crate::viewport::section_hatch(app);
     scene
@@ -1167,7 +1168,7 @@ mod tests {
     }
 
     /// `ui.render` draws in the window's theme (#974): its background is the viewport's, light
-    /// or dark.
+    /// or dark, and with the 3D view in the other theme's colours, the view's (#4146).
     #[test]
     fn model_render_is_in_the_windows_theme() {
         if !crate::gpu::test_picture_renderer() {
@@ -1178,9 +1179,15 @@ mod tests {
         let mut app = SolveApp::new(s, Services::default());
         let dir = std::env::temp_dir().join(format!("solidcraft-render-theme-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        for dark in [false, true, false] {
-            app.ui.dark = dark;
-            let png = render(&mut app, &dir.join(format!("dark-{dark}.png")));
+        use crate::theme::ViewportTheme;
+        for (window, view) in
+            [(false, ViewportTheme::Theme), (true, ViewportTheme::Theme), (true, ViewportTheme::Light), (false, ViewportTheme::Dark)]
+        {
+            app.ui.dark = window;
+            app.preferences.viewport_theme = view;
+            let dark = app.viewport_dark();
+            let theme = format!("{window}-{}", view.id());
+            let png = render(&mut app, &dir.join(format!("{theme}.png")));
             let img = image::load_from_memory(&png).unwrap().to_rgba8();
             // The top row is the background's top: its most common colour.
             let mut counts = std::collections::HashMap::new();
@@ -1190,7 +1197,7 @@ mod tests {
             let top = counts.into_iter().max_by_key(|(_, n)| *n).map(|(c, _)| c).unwrap();
             let want = if dark { crate::theme::Tokens::dark() } else { crate::theme::Tokens::light() }.viewport_top;
             let near = top.iter().zip([want.r(), want.g(), want.b()]).all(|(a, b)| a.abs_diff(b) <= 2);
-            assert!(near, "dark {dark}: the render's top row is {top:?}, the window's background {want:?}");
+            assert!(near, "{theme}: the render's top row is {top:?}, the view's background {want:?}");
         }
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1220,6 +1227,30 @@ mod tests {
         app.dialog = None;
         assert!(render(&mut app, &dir.join("committed.png")) == preview, "the committed section renders differently");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn model_render_cosmetic_threads_preserve_section_hatch_preview() {
+        let mut app = SolveApp::new(Session::default(), Services::default());
+        for cosmetic_threads in [false, true] {
+            app.preferences.cosmetic_threads = cosmetic_threads;
+            for hatch in [false, true] {
+                app.session.section_hatch = hatch;
+                assert_eq!(view_scene(&app, Default::default()).plain_cap, !hatch);
+                app.session.selection = vec![Sel::Plane { name: "XZ".into() }];
+                app.start("inspect.section");
+                let Some(crate::dialogs::Kind::Section { hatch: preview_hatch, .. }) = app.dialog.as_mut().map(|d| &mut d.kind) else {
+                    panic!("no section dialog")
+                };
+                *preview_hatch = !hatch;
+                assert_eq!(
+                    view_scene(&app, Default::default()).plain_cap,
+                    hatch,
+                    "the preview's hatch overrides the session with cosmetic_threads={cosmetic_threads}"
+                );
+                app.dialog = None;
+            }
+        }
     }
 
     /// `ui.render` with extra request parameters.

@@ -68,6 +68,9 @@ pub struct ModelBody {
     /// [`kernel::measure`] of `body` (with the body it was measured on), worked out once and
     /// shared by clones: inspecting a design again measures only the bodies that changed.
     measured: Arc<OnceLock<(Body, kernel::Result<kernel::BodyMeasure>)>>,
+    /// [`Body::is_surface`] of `body` (with the body it was measured on), worked out once and
+    /// shared by clones.
+    surface: Arc<OnceLock<(Body, bool)>>,
 }
 
 impl ModelBody {
@@ -93,6 +96,16 @@ impl ModelBody {
             source_key: 0,
             outline: Arc::new(OnceLock::new()),
             measured: Arc::new(OnceLock::new()),
+            surface: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// A surface body: some shell does not close ([`Body::is_surface`]), worked out once.
+    pub fn is_surface(&self) -> bool {
+        match self.surface.get_or_init(|| (self.body.clone(), self.body.is_surface())) {
+            (measured, s) if measured.same(&self.body) => *s,
+            // The body was replaced in this cell's holder since: look again.
+            _ => self.body.is_surface(),
         }
     }
 
@@ -331,6 +344,8 @@ pub struct ThreadInfo {
     pub body: String,
     pub designation: String,
     pub major_diameter: f64,
+    /// Radius of the actual cylindrical face when the cosmetic thread is evaluated.
+    pub radius: f64,
     pub pitch: f64,
     pub internal: bool,
     pub axis_point: Vec3,
@@ -483,6 +498,7 @@ fn thread_on_impl(
         body,
         designation: name,
         major_diameter: major,
+        radius: cyl.radius,
         pitch,
         internal: cyl.internal,
         axis_point: cyl.axis_point,
@@ -1175,19 +1191,21 @@ pub struct Model {
 }
 
 /// Parameters a feature uses directly (inputs, sketch dimensions and the expressions of a
-/// sketch's texts), sorted.
+/// sketch's texts, the text parameters of their words included), sorted.
 fn param_names(f: &Feature) -> Vec<String> {
     let mut names: Vec<String> = f.kind.expressions().iter().flat_map(|e| expr::references(e)).collect();
     if let FeatureKind::Sketch { sketch, .. } = &f.kind {
         names.extend(sketch.constraints.iter().filter_map(|c| c.param.clone()));
+        names.extend(sketch.patterns.iter().flat_map(|p| p.expressions.values()).flat_map(|e| expr::references(e)));
         names.extend(sketch.text_exprs().into_iter().flat_map(|(_, e)| expr::references(e)));
+        names.extend(sketch.text_word_exprs().into_iter().flat_map(|e| crate::text_params::references(e)));
     }
     names.sort();
     names.dedup();
     names
 }
 
-fn fingerprint(prev: u64, f: &Feature, vals: &BTreeMap<String, Value>, rolled_back: bool, steps: &StepDigests) -> u64 {
+fn fingerprint(doc: &Document, prev: u64, f: &Feature, vals: &BTreeMap<String, Value>, rolled_back: bool, steps: &StepDigests) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     prev.hash(&mut h);
     rolled_back.hash(&mut h);
@@ -1195,13 +1213,14 @@ fn fingerprint(prev: u64, f: &Feature, vals: &BTreeMap<String, Value>, rolled_ba
     hash_feature_json(f, steps, &mut h);
     for n in param_names(f) {
         n.hash(&mut h);
-        match vals.get(&n) {
-            Some(v) => {
+        match (vals.get(&n), doc.text_param(&n)) {
+            (Some(v), _) => {
                 v.v.to_bits().hash(&mut h);
                 v.len.hash(&mut h);
                 v.ang.hash(&mut h);
             }
-            None => 0u8.hash(&mut h),
+            (None, Some(p)) => p.text.hash(&mut h),
+            (None, None) => 0u8.hash(&mut h),
         }
     }
     h.finish()
@@ -1325,13 +1344,28 @@ fn feature_json(f: &Feature, steps: &StepDigests) -> String {
 /// constraints' values. Nothing else: what evaluation derives for its own copy (an offset's
 /// upgraded topology, refreshed links) stays out of the stored sketch. A `solved` that does not
 /// match `stored` entity for entity is not adopted.
-fn adopt_solution(stored: &mut solidcraft_sketch::Sketch, solved: &solidcraft_sketch::Sketch) {
+fn adopt_solution(stored: &mut solidcraft_sketch::Sketch, solved: &solidcraft_sketch::Sketch) -> bool {
+    if stored.patterns != solved.patterns {
+        // Rebuild authored copies without storing topology derived from links or offsets.
+        let mut updated = stored.clone();
+        for pattern in &solved.patterns {
+            let Some(index) = updated.patterns.iter().position(|p| p.id == pattern.id) else { return false };
+            if updated.update_pattern(index, pattern.kind.clone()).is_err() {
+                return false;
+            }
+        }
+        if updated.patterns != solved.patterns || !adopt_solution(&mut updated, solved) {
+            return false;
+        }
+        *stored = updated;
+        return true;
+    }
     if stored.points.len() != solved.points.len()
         || stored.curves.len() != solved.curves.len()
         || stored.constraints.len() != solved.constraints.len()
         || stored.constraints.iter().zip(&solved.constraints).any(|(a, b)| a.id != b.id)
     {
-        return;
+        return false;
     }
     for (p, q) in stored.points.iter_mut().zip(&solved.points) {
         p.pos = q.pos;
@@ -1353,6 +1387,7 @@ fn adopt_solution(stored: &mut solidcraft_sketch::Sketch, solved: &solidcraft_sk
             c.kind.set_value(v);
         }
     }
+    true
 }
 
 /// The values features are evaluated with: the parameters, and the design's length unit.
@@ -1378,7 +1413,7 @@ fn chain_fingerprint(
     steps: &StepDigests,
     st: Option<&ModelState>,
 ) -> u64 {
-    let mut fp = fingerprint(prev, f, vals, rolled_back, steps) ^ placement_digest(doc, f, st);
+    let mut fp = fingerprint(doc, prev, f, vals, rolled_back, steps) ^ placement_digest(doc, f, st);
     // Sheet metal features also depend on the rules (and the parameters they use).
     if f.kind.is_sheet() {
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1417,7 +1452,7 @@ fn context_digest(doc: &Document, vals: &BTreeMap<String, Value>) -> u64 {
     for f in doc.features.iter().filter(|f| {
         matches!(f.kind, FeatureKind::ConstructionPlane { .. } | FeatureKind::ConstructionAxis { .. } | FeatureKind::ConstructionPoint { .. })
     }) {
-        fingerprint(0, f, vals, false, &StepDigests::default()).hash(&mut h);
+        fingerprint(doc, 0, f, vals, false, &StepDigests::default()).hash(&mut h);
     }
     doc.units.hash(&mut h);
     serde_json::to_string(&doc.sheet).unwrap_or_default().hash(&mut h);
@@ -1859,6 +1894,7 @@ impl Model {
             s.report.keeps_orientation()
                 && doc.sketch(s.feature).is_ok_and(|stored| {
                     stored.driving_values() != s.sketch.driving_values()
+                        || stored.patterns != s.sketch.patterns
                         || s.sketch.points.iter().zip(&stored.points).any(|(p, q)| p.link.is_some() && p.id == q.id && p.pos != q.pos)
                 })
         })
@@ -1986,7 +2022,8 @@ impl Model {
                 Arc::make_mut(&mut state).reserved_body_names.clone_from(&reserved);
             }
             // The same feature on the same inputs: its earlier result.
-            let key = cache_key(f, fp, fingerprint(0, f, &vals, false, &self.step_digests) ^ placement_digest(doc, f, Some(&state)), ctx, &state);
+            let key =
+                cache_key(f, fp, fingerprint(doc, 0, f, &vals, false, &self.step_digests) ^ placement_digest(doc, f, Some(&state)), ctx, &state);
             let kept = self.kept.0.as_ref().filter(|_| !self.no_cache);
             if !self.no_cache
                 && let Some(c) = self.cache.lock().ok().and_then(|mut m| m.get(key)).or_else(|| kept.and_then(|k| k.get(key)))
@@ -2598,7 +2635,15 @@ fn intersection_tool_union(tools: Vec<Traced>) -> Result<Vec<Traced>> {
 }
 
 /// After a cut handled some sheet bodies as flat machining, apply it to the other targets.
-fn apply_beside_sheet_cut(st: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Operation, targets: &[String], handled: &[String]) -> Result<()> {
+fn apply_beside_sheet_cut(
+    doc: &Document,
+    st: &mut ModelState,
+    f: &Feature,
+    tools: Vec<Traced>,
+    op: Operation,
+    targets: &[String],
+    handled: &[String],
+) -> Result<()> {
     let effective = if targets.is_empty() { &f.participants } else { targets };
     let all = effective.len() == 1 && effective.first().is_some_and(|t| t == "*");
     let rest: Vec<String> = st
@@ -2613,7 +2658,7 @@ fn apply_beside_sheet_cut(st: &mut ModelState, f: &Feature, tools: Vec<Traced>, 
     if rest.is_empty() {
         return Ok(());
     }
-    apply_traced(st, f, tools, op, &rest)
+    apply_traced(doc, st, f, tools, op, &rest)
 }
 
 /// Only one target meets every separated tool. A tool with no contact must retain
@@ -2639,8 +2684,8 @@ fn common_join_target(state: &ModelState, indices: &[usize], tools: &[Traced]) -
     Ok(common.filter(|index| contacts.iter().all(|contact| *contact == Some(*index))))
 }
 
-fn apply_op(state: &mut ModelState, f: &Feature, tools: Vec<Body>, op: Operation, targets: &[String]) -> Result<()> {
-    apply_traced(state, f, tools.into_iter().map(Traced::unnamed).collect(), op, targets)
+fn apply_op(doc: &Document, state: &mut ModelState, f: &Feature, tools: Vec<Body>, op: Operation, targets: &[String]) -> Result<()> {
+    apply_traced(doc, state, f, tools.into_iter().map(Traced::unnamed).collect(), op, targets)
 }
 
 /// Many cut tools clear of each other (a pattern's copies, the circles of a vent field in one
@@ -2685,8 +2730,60 @@ pub(crate) fn boolean_scope(state: &ModelState, f: &Feature, targets: &[String])
     (!all && !effective.is_empty(), names)
 }
 
+/// Suggest one nearby body without changing the default component scope or running a boolean.
+fn empty_boolean_targets(doc: &Document, state: &ModelState, f: &Feature, tools: &[Traced], default_targets: bool) -> DocError {
+    let plain = "there is no body to cut or intersect";
+    if !default_targets {
+        return DocError::Invalid(plain.into());
+    }
+    let component_name = |id| {
+        if id == 0 {
+            doc.name.clone()
+        } else {
+            doc.components.iter().take(10_000).find(|c| c.id == id).map(|c| c.name.clone()).unwrap_or_else(|| format!("Component{id}"))
+        }
+    };
+    let tool_bounds: Vec<_> = tools.iter().take(64).map(|t| t.body.outline_bounds()).collect();
+    let frame = doc.component_transform(f.component);
+    let Some(inverse) = crate::mat_inverse(&frame) else { return DocError::Invalid(plain.into()) };
+    // Named by the component the Browser shows the body in; one shown in the feature's own
+    // component has no other component to point at.
+    let others = state
+        .bodies
+        .iter()
+        .take(256)
+        .map(|b| (b, doc.model_body_component(b)))
+        .filter(|(b, owner)| b.component != f.component && *owner != f.component);
+    for (body, owner) in others {
+        // Compare in the feature's frame, including component placements and body offsets.
+        let world = body_world(doc, body);
+        let relative = crate::mat_mul(&inverse, &world);
+        let bounds = body.outline_bounds();
+        if bounds.is_empty() || !bounds.min.is_finite() || !bounds.max.is_finite() {
+            continue;
+        }
+        let mut placed = solidcraft_geom::Aabb3::EMPTY;
+        for x in [bounds.min.x, bounds.max.x] {
+            for y in [bounds.min.y, bounds.max.y] {
+                for z in [bounds.min.z, bounds.max.z] {
+                    placed.add(crate::apply_point(&relative, Vec3::new(x, y, z)));
+                }
+            }
+        }
+        if tool_bounds.iter().any(|b| !b.is_empty() && b.min.is_finite() && b.max.is_finite() && b.meets(&placed)) {
+            let own = component_name(f.component);
+            let other = component_name(owner);
+            let name = &body.name;
+            return DocError::Invalid(format!(
+                "{plain} in component '{own}'; the tool may overlap '{name}' in component '{other}' — activate that component or pick the body as a target"
+            ));
+        }
+    }
+    DocError::Invalid(plain.into())
+}
+
 /// [`apply_op`] with tools whose lineage is known: the bodies it makes or changes keep theirs.
-fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Operation, targets: &[String]) -> Result<()> {
+fn apply_traced(doc: &Document, state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Operation, targets: &[String]) -> Result<()> {
     let tools = if op == Operation::Intersect { intersection_tool_union(tools)? } else { tools };
     // Participants: the feature's own targets, else its explicit participants, else the bodies
     // of its component (and what it made itself): other components are left alone.
@@ -2706,7 +2803,7 @@ fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Ope
     };
     if op == Operation::NewBody || target_idx.is_empty() {
         if op == Operation::Cut || op == Operation::Intersect {
-            return Err(DocError::Invalid("there is no body to cut or intersect".into()));
+            return Err(empty_boolean_targets(doc, state, f, &tools, targets.is_empty()));
         }
         for (k, t) in tools.into_iter().enumerate() {
             let name = new_name(state, f, k);
@@ -2752,7 +2849,7 @@ fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Ope
             let mut batched = state.clone();
             // Preserve the original participants. For Join, the compound's larger
             // size must not expand the contact tolerance and absorb a nearby body.
-            if apply_traced(&mut batched, f, vec![Traced::step(compound, &tools.iter().collect::<Vec<_>>())], op, &names).is_ok() {
+            if apply_traced(doc, &mut batched, f, vec![Traced::step(compound, &tools.iter().collect::<Vec<_>>())], op, &names).is_ok() {
                 *state = batched;
                 return Ok(());
             }
@@ -6298,12 +6395,12 @@ fn replay(
         }
         // New bodies from a pattern join their source when they touch it (as one feature would).
         if f.body_names.is_empty() {
-            apply_traced(st, f, copies, op, &targets)?;
+            apply_traced(doc, st, f, copies, op, &targets)?;
         } else {
             let start = st.bodies.iter().filter(|b| b.feature == f.id).count();
             let mut named = f.clone();
             named.body_names = f.body_names.iter().skip(start).cloned().collect();
-            apply_traced(st, &named, copies, op, &targets)?;
+            apply_traced(doc, st, &named, copies, op, &targets)?;
         }
     }
     if missed > 0 {
@@ -6784,10 +6881,10 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
                 let bodies: Vec<Body> = tools.iter().map(|t| t.body.clone()).collect();
                 let handled = more::sheet_cut(f, st, &bodies, &crate::plain(targets), constructor.as_ref(), warning)?;
                 if !handled.is_empty() {
-                    return apply_beside_sheet_cut(st, f, tools, *operation, &crate::plain(targets), &handled);
+                    return apply_beside_sheet_cut(doc, st, f, tools, *operation, &crate::plain(targets), &handled);
                 }
             }
-            apply_traced(st, f, tools, *operation, &crate::plain(targets))
+            apply_traced(doc, st, f, tools, *operation, &crate::plain(targets))
         }
         FeatureKind::Hole { thread, thread_depth, diameter, .. } => {
             let thread_depth = thread_depth.as_ref().map(|d| val(vals, d, Kind::Length)).transpose()?;
@@ -6802,9 +6899,9 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             let handled = sheet_hole_cut(st, f, &tools, warning)?;
             let tools: Vec<Traced> = tools.into_iter().map(|(tool, _)| tool).collect();
             if handled.is_empty() {
-                apply_traced(st, f, tools, Operation::Cut, &[])?;
+                apply_traced(doc, st, f, tools, Operation::Cut, &[])?;
             } else {
-                apply_beside_sheet_cut(st, f, tools, Operation::Cut, &[], &handled)?;
+                apply_beside_sheet_cut(doc, st, f, tools, Operation::Cut, &[], &handled)?;
             }
             if let Some(d) = thread {
                 // Find the bore beyond any entry recess, including shallow and through holes.
@@ -7011,7 +7108,7 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             if *remove_tools {
                 st.bodies.retain(|b| !tools.iter().any(|t| *t == b.name));
             }
-            apply_traced(st, f, made, *operation, &[])
+            apply_traced(doc, st, f, made, *operation, &[])
         }
         FeatureKind::SplitFace { faces, body, plane, tool, sketch } => {
             let i = body_at(st, body, &crate::plain(faces))?;
@@ -7244,9 +7341,9 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             let handled = more::sheet_primitive_cut(f, st, &b, more::PrimitivePrism::Box { lo: corner, hi: corner + s }, *operation, false, warning)?;
             let tools = vec![crate::lineage::box_tool(b)];
             if !handled.is_empty() {
-                return apply_beside_sheet_cut(st, f, tools, *operation, &[], &handled);
+                return apply_beside_sheet_cut(doc, st, f, tools, *operation, &[], &handled);
             }
-            apply_traced(st, f, tools, *operation, &[])
+            apply_traced(doc, st, f, tools, *operation, &[])
         }
         FeatureKind::Cylinder { base, axis, radius, height, operation } => {
             let (base, radius, height) = (point(vals, base)?, val(vals, radius, Kind::Length)?, val(vals, height, Kind::Length)?);
@@ -7256,17 +7353,17 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             let handled = more::sheet_primitive_cut(f, st, &b, prism, *operation, false, warning)?;
             let tools = vec![crate::lineage::cylinder_tool(b)];
             if !handled.is_empty() {
-                return apply_beside_sheet_cut(st, f, tools, *operation, &[], &handled);
+                return apply_beside_sheet_cut(doc, st, f, tools, *operation, &[], &handled);
             }
-            apply_traced(st, f, tools, *operation, &[])
+            apply_traced(doc, st, f, tools, *operation, &[])
         }
         FeatureKind::Sphere { center, radius, operation } => {
             let b = kernel::sphere(point(vals, center)?, val(vals, radius, Kind::Length)?)?;
-            apply_op(st, f, vec![b], *operation, &[])
+            apply_op(doc, st, f, vec![b], *operation, &[])
         }
         FeatureKind::Torus { center, major, minor, operation } => {
             let b = kernel::torus(point(vals, center)?, val(vals, major, Kind::Length)?, val(vals, minor, Kind::Length)?)?;
-            apply_op(st, f, vec![b], *operation, &[])
+            apply_op(doc, st, f, vec![b], *operation, &[])
         }
         FeatureKind::Combine { target, tools, operation, keep_tools } => {
             if tools.iter().any(|t| t == target) {
@@ -7314,7 +7411,7 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
                 return Ok(()); // the pieces were all joined back into the body they are part of
             }
             let op = if *operation == Operation::NewBody { Operation::Join } else { *operation };
-            apply_traced(st, f, tb, op, std::slice::from_ref(&target.0))?;
+            apply_traced(doc, st, f, tb, op, std::slice::from_ref(&target.0))?;
             if !keep_tools {
                 st.bodies.retain(|b| !tools.iter().any(|t| *t == b.name));
             }
@@ -8033,17 +8130,19 @@ pub fn world_state_reusing(doc: &Document, st: &ModelState, placed_before: &mut 
                 let geom = if ident { c.geom.clone() } else { c.geom.placed(&m) };
                 out.construct.push(crate::construct::Construct { geom, ..c.clone() });
             }
-            for t in st
-                .threads
-                .iter()
-                .filter(|t| st.body(&t.body).map(|body| doc.model_body_component(body)).unwrap_or_else(|| comp_of_feature(t.feature)) == comp)
-            {
-                let mut t2 = t.clone();
-                let frame = st.body(&t.body).and_then(|body| doc.model_body_offset(body)).map(|offset| crate::mat_mul(&m, offset)).unwrap_or(m);
-                t2.axis_point = crate::apply_point(&frame, t.axis_point);
-                t2.axis = crate::apply_vector(&frame, *t.axis).unit().unwrap_or(t.axis);
-                out.threads.push(t2);
-            }
+        }
+        // Unlike editable sketch guides, cosmetic surfaces belong to every occurrence.
+        for t in st
+            .threads
+            .iter()
+            .filter(|t| st.body(&t.body).map(|body| doc.model_body_component(body)).unwrap_or_else(|| comp_of_feature(t.feature)) == comp)
+        {
+            let mut t2 = t.clone();
+            t2.body = doc.world_body_name(st, &t.body, comp, &path);
+            let frame = st.body(&t.body).and_then(|body| doc.model_body_offset(body)).map(|offset| crate::mat_mul(&m, offset)).unwrap_or(m);
+            t2.axis_point = crate::apply_point(&frame, t.axis_point);
+            t2.axis = crate::apply_vector(&frame, *t.axis).unit().unwrap_or(t.axis);
+            out.threads.push(t2);
         }
     }
     *placed_before = placed_now;

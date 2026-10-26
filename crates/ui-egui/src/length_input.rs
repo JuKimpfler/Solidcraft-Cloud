@@ -100,7 +100,7 @@ pub(crate) fn fields<'a>(doc: &Document, kind: &'a mut crate::dialogs::Kind) -> 
         D::Thread { length, .. } | D::Emboss { depth: length, .. } => vec![length],
         D::Rib { thickness, depth, .. } => vec![thickness, depth],
         D::PathPattern { spacing, .. } => vec![spacing],
-        D::Pipe { diameter, wall } => vec![diameter, wall],
+        D::Pipe { diameter, wall, .. } => vec![diameter, wall],
         D::Stock { margin } => vec![margin],
         D::Move { x, y, z, .. } => vec![x, y, z],
         D::Hole { diameter, depth, cb_diameter, cb_depth, cs_diameter, .. } => vec![diameter, depth, cb_diameter, cb_depth, cs_diameter],

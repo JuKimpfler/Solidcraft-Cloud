@@ -214,8 +214,14 @@ connect with `sudo snap connect solidcraft:removable-media` (getting-started.md)
 
 ## WinGet (Windows Package Manager)
 
-SolidCraft is in [winget-pkgs](https://github.com/microsoft/winget-pkgs) as
-`bherbruck.SolidCraft` (`winget install bherbruck.SolidCraft`). Publishing a non-prerelease
+SolidCraft is not in [winget-pkgs](https://github.com/microsoft/winget-pkgs) yet: its first
+version, as `bherbruck.SolidCraft`, has to be submitted and merged there once (by hand, with
+Komac or `wingetcreate`) before `winget install bherbruck.SolidCraft` finds it. A first
+submission, for 0.21.0, is already open as
+[microsoft/winget-pkgs#452486](https://github.com/microsoft/winget-pkgs/pull/452486) (flagged
+`Validation-Executable-Error`): take that one up rather than opening another. Until then the
+README and [downloads](downloads.md) don't offer the command (#5734); add it back when the
+package is listed. After that first version, publishing a non-prerelease
 GitHub release runs `winget.yml`, which uses [Komac](https://github.com/russellbanks/Komac)
 (a pinned, checksum-verified binary) to open a pull request at microsoft/winget-pkgs from the
 owner's fork `bherbruck/winget-pkgs`. It submits the three versioned MSIs
@@ -284,6 +290,19 @@ valid, because the signature carries a secure timestamp.
 Signing currently uses a maintainer's **personal** Developer ID, so downloads show that person's
 name, not an organisation's. Moving to an organisation account means replacing the certificate
 and the API key secrets (`APPLE_API_KEY_P8`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`).
+
+## Homebrew tap
+
+macOS users install with `brew install --cask tangency-labs/tap/solidcraft` from the tap repository
+[tangency-labs/homebrew-tap](https://github.com/tangency-labs/homebrew-tap) (`Casks/solidcraft.rb`).
+Homebrew's own cask repository only takes signed and notarized apps, so the tap stays until the
+macOS signing work lands.
+
+After publishing a stable release, bump the cask: set `version` and the `sha256` of
+`solidcraft-<version>-macos-universal.dmg` (the line for that file in the release's
+`SHA256SUMS.txt`), run `brew style Casks/solidcraft.rb`, and push to the tap's `main`. The cask's
+`livecheck` follows the latest GitHub release, so `brew livecheck --cask tangency-labs/tap/solidcraft`
+shows when the tap is behind. Skip prereleases and nightlies.
 
 ## Update signing
 

@@ -239,7 +239,7 @@ pub fn candidate(d: &Dialog, session: &solidcraft_engine::Session, hit: &Hit) ->
     let active = session.active_sketch?;
     match hit {
         Hit::SketchCurve { sketch, .. } | Hit::SketchPoint { sketch, .. } if *sketch != active => None,
-        _ => d.active_input()?.accepts(hit, |_, _| false),
+        _ => d.active_input()?.accepts(hit, Some(active), |_, _| false),
     }
 }
 
@@ -251,18 +251,19 @@ pub fn edit_pattern(app: &mut SolveApp, id: &str) -> bool {
     let state = app.session.world_state();
     let Some(sk) = state.sketch(sid).map(|s| &s.sketch) else { return false };
     let Some(pattern) = sk.patterns.iter().find(|p| p.id == id) else { return false };
+    let input = |key: &str, fallback: String| pattern.expressions.get(key).cloned().unwrap_or(fallback);
     let kind = match &pattern.kind {
         SketchPatternKind::Circular { count, angle, alignment, reversed, .. } => Mod::PatternCirc {
-            count: pattern.count_expression.clone().unwrap_or_else(|| count.to_string()),
-            angle: format!("{angle} deg"),
+            count: pattern.count_expression.clone().unwrap_or_else(|| input("count", count.to_string())),
+            angle: input("angle", format!("{angle} deg")),
             alignment: if *alignment == PatternAlignment::Left { PatternAlignment::Right } else { *alignment },
             reversed: *reversed ^ (*alignment == PatternAlignment::Left),
         },
         SketchPatternKind::Rectangular { count, spacing, count2, spacing2, alignment, alignment2, reversed, reversed2, .. } => Mod::PatternRect {
-            count: count.to_string(),
-            spacing: format!("{spacing} mm"),
-            count2: count2.to_string(),
-            spacing2: format!("{spacing2} mm"),
+            count: input("count", count.to_string()),
+            spacing: input("spacing", format!("{spacing} mm")),
+            count2: input("count2", count2.to_string()),
+            spacing2: input("spacing2", format!("{spacing2} mm")),
             alignment: if *alignment == PatternAlignment::Left { PatternAlignment::Right } else { *alignment },
             alignment2: if *alignment2 == PatternAlignment::Left { PatternAlignment::Right } else { *alignment2 },
             reversed: *reversed ^ (*alignment == PatternAlignment::Left),
@@ -271,11 +272,14 @@ pub fn edit_pattern(app: &mut SolveApp, id: &str) -> bool {
     };
     let mut dialog = Dialog::new(Kind::SketchModify(kind.clone()), inputs(&kind));
     if let Some(input) = dialog.inputs.first_mut() {
-        input.items = pattern
-            .entities
-            .iter()
-            .map(|id| if sk.curve_index(id).is_some() { Sel::SketchCurve { id: id.clone() } } else { Sel::SketchPoint { id: id.clone() } })
-            .collect();
+        input.items =
+            pattern
+                .entities
+                .iter()
+                .map(|id| {
+                    if sk.curve_index(id).is_some() { Sel::SketchCurve { id: id.clone(), sketch: None } } else { Sel::SketchPoint { id: id.clone() } }
+                })
+                .collect();
     }
     match &pattern.kind {
         SketchPatternKind::Circular { center, .. } => {
@@ -290,7 +294,7 @@ pub fn edit_pattern(app: &mut SolveApp, id: &str) -> bool {
                 if let Some(id) = id
                     && let Some(input) = dialog.inputs.get_mut(index)
                 {
-                    input.items = vec![Sel::SketchCurve { id: id.clone() }];
+                    input.items = vec![Sel::SketchCurve { id: id.clone(), sketch: None }];
                 }
             }
         }
@@ -556,7 +560,7 @@ fn entity_ids(session: &solidcraft_engine::Session, inputs: &[SelInput], i: usiz
     items(inputs, i)
         .iter()
         .filter_map(|x| match x {
-            Sel::SketchCurve { id } => Some(id.clone()),
+            Sel::SketchCurve { id, .. } => Some(id.clone()),
             _ => point_id(session, x).map(str::to_string),
         })
         .collect()
@@ -564,7 +568,7 @@ fn entity_ids(session: &solidcraft_engine::Session, inputs: &[SelInput], i: usiz
 
 /// Sketch curve ids picked in input `i`.
 fn curve_ids(inputs: &[SelInput], i: usize) -> Vec<String> {
-    items(inputs, i).iter().filter_map(|x| if let Sel::SketchCurve { id } = x { Some(id.clone()) } else { None }).collect()
+    items(inputs, i).iter().filter_map(|x| if let Sel::SketchCurve { id, .. } = x { Some(id.clone()) } else { None }).collect()
 }
 
 /// A typed scale factor as the command wants it: the field evaluated against the document's
@@ -606,14 +610,7 @@ fn signed_length(app: &SolveApp, label: &str, text: &str, flip: bool) -> Result<
     Ok(if flip { -v } else { v })
 }
 
-/// A typed count as the command wants it: the field evaluated against the document's
-/// parameters, then a whole number the engine accepts.
-///
-/// The sketch patterns read `count` and `angle` with `num`, which takes a JSON number and
-/// nothing else. An expression string would be refused outright for `count`, and silently
-/// replaced by the 360 degree default for `angle`. That silent substitution is the defect
-/// upstream #218 reports for `solid.pattern.circular`'s axis origin. The window therefore
-/// evaluates every value here and sends numbers.
+/// Validate a typed count before sending its expression to the command.
 fn whole(app: &SolveApp, label: &str, text: &str) -> Result<u64, String> {
     let v = app.session.doc.eval(text.trim(), ValueKind::Unitless).map_err(|e| format!("{label}: {e}"))?;
     if !v.is_finite() || !(1.0..=MAX_COPIES).contains(&v) || (v - v.round()).abs() > 1e-9 {
@@ -638,7 +635,7 @@ fn line_ids(inputs: &[SelInput], i: usize) -> Vec<String> {
     items(inputs, i)
         .iter()
         .filter_map(|x| match x {
-            Sel::SketchCurve { id } => Some(id.clone()),
+            Sel::SketchCurve { id, .. } => Some(id.clone()),
             _ => None,
         })
         .collect()
@@ -744,7 +741,7 @@ pub fn commands(app: &SolveApp, k: &Mod, inputs: &[SelInput], extra: &Map<String
             // The AXES mask also takes an origin axis, which is not a curve of this sketch and
             // cannot be a mirror line.
             let line = match items(inputs, 1).first() {
-                Some(Sel::SketchCurve { id }) => id.clone(),
+                Some(Sel::SketchCurve { id, .. }) => id.clone(),
                 Some(_) => return Err("The mirror line must be a straight curve of this sketch, not an origin axis".into()),
                 None => return Err("Select the mirror line".into()),
             };
@@ -788,7 +785,7 @@ pub fn commands(app: &SolveApp, k: &Mod, inputs: &[SelInput], extra: &Map<String
             if n1.saturating_mul(n2) > MAX_COPIES as u64 {
                 return Err(format!("Quantity and Quantity 2 together must make at most {MAX_COPIES:.0} instances"));
             }
-            let mut p = json!({"entities": entities, "count": n1, "spacing": s1, "count2": n2, "spacing2": s2, "alignment": alignment, "alignment2": alignment2, "reversed": reversed, "reversed2": reversed2});
+            let mut p = json!({"entities": entities, "count": count, "spacing": spacing, "count2": count2, "spacing2": spacing2, "alignment": alignment, "alignment2": alignment2, "reversed": reversed, "reversed2": reversed2});
             // A picked direction that has no component in the sketch plane is reported rather
             // than quietly replaced by the default.
             for (index, vector_key, line_key) in [(1, "dir", "direction"), (2, "dir2", "direction2")] {
@@ -796,7 +793,7 @@ pub fn commands(app: &SolveApp, k: &Mod, inputs: &[SelInput], extra: &Map<String
                     let d = sketch_dir(app, sel).ok_or("The direction must be an axis or a straight sketch curve that lies in the sketch plane")?;
                     p[vector_key] = json!([d.x, d.y]);
                     p[line_key] = match sel {
-                        Sel::SketchCurve { id } => json!(id),
+                        Sel::SketchCurve { id, .. } => json!(id),
                         _ => Value::Null,
                     };
                 } else {
@@ -823,10 +820,10 @@ pub fn commands(app: &SolveApp, k: &Mod, inputs: &[SelInput], extra: &Map<String
             if n < 2 {
                 return Err("Quantity must be at least 2".into());
             }
-            let a = total_angle(app, "Total angle", angle)?;
+            total_angle(app, "Total angle", angle)?;
             (
                 "sketch.pattern.circular",
-                json!({"entities": entities, "center": center, "count": count.trim().parse::<u64>().map_or_else(|_| json!(count.trim()), |_| json!(n)), "angle": a, "alignment": alignment, "reversed": reversed}),
+                json!({"entities": entities, "center": center, "count": count, "angle": angle, "alignment": alignment, "reversed": reversed}),
             )
         }
         Mod::Corner { chamfer: false, size, .. } => {
