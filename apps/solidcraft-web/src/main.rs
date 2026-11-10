@@ -1318,7 +1318,7 @@ mod web {
                                 if server::parse(path).is_some() {
                                     server::restore(&cloud_restore, path);
                                 } else {
-                                    disk::restore(&restorer, path);
+                                    disk::restore(&restorer, path, None);
                                 }
                             })),
                             download_design: Some(Box::new(files::download)),

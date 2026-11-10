@@ -804,7 +804,7 @@ mod web {
                     app.home.open = false;
                 }
                 None => {
-                    app.open_path(&p);
+                    app.open_path_with(&p, &Default::default());
                     let Some(notice) = copy else { continue };
                     // A copy of a design somebody has: it keeps no file, so Save asks for a name
                     // on the server instead of writing over their work.
