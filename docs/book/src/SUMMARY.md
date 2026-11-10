@@ -6,7 +6,9 @@
 
 - [Getting started](guide/getting-started.md)
 - [A tour of the window](guide/ui-tour.md)
+- [How a design is built](guide/design-approach.md)
 - [Sketching and constraints](guide/sketching.md)
+  - [Equation curves](guide/equation-curves.md)
 - [Solid features](guide/features.md)
 - [Parameters and expressions](guide/parameters.md)
 - [Components and joints](guide/assemblies.md)
@@ -23,6 +25,7 @@
 # Developer guide
 
 - [Contributing](dev/contributing.md)
+- [Command guides and community resources](dev/command-guides.md)
 - [Architecture](dev/architecture.md)
 - [UI kit](dev/ui-kit.md)
 - [Extensible library proposal](dev/libraries.md)
