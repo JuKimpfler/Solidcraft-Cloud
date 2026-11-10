@@ -26,17 +26,61 @@ const SOURCE_KINDS: [SourceKind; 4] = [SourceKind::UserSupplied, SourceKind::Mea
 pub struct Editor {
     pub(crate) draft: Option<Draft>,
     error: Option<String>,
+    /// The design revision and the command Save was refused with (none when the draft did not
+    /// validate): `error` stays only while the draft would run it again on the same design.
+    refused: Option<(u64, Option<(&'static str, Value)>)>,
     note: Option<String>,
+    chosen_material: Option<String>,
+    observed_index: Option<usize>,
+    mixed_materials: bool,
 }
 
 impl Editor {
+    /// Follow the targets until the user deliberately chooses a material. Keep a
+    /// choice by name: inserting, renaming or deleting a library row must not
+    /// silently turn it into another material at the same ordinal.
+    pub(crate) fn sync_selection(&mut self, doc: &Document, bodies: &[String], index: &mut usize) {
+        if self.editing() {
+            return;
+        }
+        let names = doc.material_names();
+        if self.observed_index.is_some_and(|previous| previous != *index) {
+            self.chosen_material = names.get(*index).cloned();
+        }
+        let materials: Vec<_> = bodies
+            .iter()
+            .map(|body| {
+                let assigned = doc.materials.get(body).map(String::as_str).unwrap_or(solidcraft_engine::doc::DEFAULT_MATERIAL);
+                doc.material_name(assigned).filter(|name| doc.material_density(name).is_some())
+            })
+            .collect();
+        self.mixed_materials = materials.first().is_some_and(|first| materials.iter().any(|material| material != first));
+        let common = materials.first().and_then(Option::as_ref).filter(|first| materials.iter().all(|material| material.as_ref() == Some(*first)));
+        let selected = self.chosen_material.as_ref().or(common);
+        *index = selected.and_then(|name| names.iter().position(|candidate| candidate == name)).unwrap_or(usize::MAX);
+        self.observed_index = Some(*index);
+    }
+
     pub fn editing(&self) -> bool {
         self.draft.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// Show why Save was refused, for as long as the draft would run the same command on the
+    /// same design.
+    fn refuse(&mut self, error: String, revision: u64, doc: &Document) {
+        self.refused = Some((revision, self.draft.as_ref().and_then(|d| d.command(doc).ok().flatten())));
+        self.error = Some(error);
     }
 
     pub(crate) fn begin(&mut self, doc: &Document, source: Option<&str>, duplicate: bool) {
         self.draft = Some(Draft::new(doc, source, duplicate));
         self.error = None;
+        self.refused = None;
         self.note = None;
     }
 
@@ -47,8 +91,11 @@ impl Editor {
             app.run(command, params)?;
         }
         *index = app.session.doc.material_names().iter().position(|n| n == &name).unwrap_or(*index);
+        self.chosen_material = Some(name);
+        self.observed_index = Some(*index);
         self.draft = None;
         self.error = None;
+        self.refused = None;
         self.note = Some(tr("material.editor.saved").to_string());
         Ok(())
     }
@@ -271,8 +318,9 @@ fn number(value: &str, field: &str) -> Result<f64, String> {
 
 fn field(ui: &mut egui::Ui, label: &str, id: &str, value: &mut String, unit: &str) {
     let label = if unit.is_empty() { label.to_string() } else { format!("{label} ({unit})") };
-    let response =
-        ui_kit::row(ui, &label, |ui| ui_kit::cell_editor(ui, egui::Id::new(("physical_editor", id)), value, tr("ui.material_review.unknown"), false));
+    let response = ui_kit::row(ui, &label, |ui| {
+        ui_kit::cell_editor(ui, egui::Id::unique(("physical_editor", id)), value, tr("ui.material_review.unknown"), false)
+    });
     crate::scenario::publish_handle(&format!("material:field:{id}"), response.rect.center());
 }
 
@@ -406,8 +454,22 @@ fn card_rows(ui: &mut egui::Ui, card: &mut CardDraft) {
 pub(crate) fn rows(app: &mut SolveApp, ui: &mut egui::Ui, index: &mut usize, editor: &mut Editor) {
     let names = app.session.doc.material_names();
     if editor.draft.is_none() {
-        let refs: Vec<_> = names.iter().map(String::as_str).collect();
-        ui_kit::choice_row(ui, "Material", "mat", index, &refs);
+        let placeholder = if editor.mixed_materials { "material.selection.mixed" } else { "material.selection.choose" };
+        let current = names.get(*index).map(String::as_str).unwrap_or_else(|| tr(placeholder));
+        ui_kit::row(ui, "Material", |ui| {
+            ui_kit::dropdown_menu(ui, "mat", current, |ui| {
+                for (i, name) in names.iter().enumerate() {
+                    let option = ui_kit::list_picker(ui, &format!("physical_material_{i}"), name, *index == i);
+                    crate::scenario::publish_handle(&format!("dialog:Material:{name}"), option.rect.center());
+                    if option.clicked() {
+                        *index = i;
+                        editor.chosen_material = Some(name.clone());
+                        editor.observed_index = Some(i);
+                        ui.close();
+                    }
+                }
+            });
+        });
         let selected = names.get(*index).map(String::as_str);
         ui.horizontal_wrapped(|ui| {
             let new = ui_kit::button(ui, tr("New"), ui_kit::Button::Normal);
@@ -455,6 +517,16 @@ pub(crate) fn rows(app: &mut SolveApp, ui: &mut egui::Ui, index: &mut usize, edi
             ui_kit::text(ui, tr("material.editor.unknown_card"), ui_kit::Text::Note("unknown_card"));
         }
         let validation = draft.command(&app.session.doc);
+        // A refused Save's message is about the command it ran and the design it ran on (#641):
+        // once the draft would run another, or the design changed, it goes.
+        if editor
+            .refused
+            .as_ref()
+            .is_some_and(|(revision, was)| (*revision, was.as_ref()) != (app.session.revision, validation.as_ref().ok().and_then(|c| c.as_ref())))
+        {
+            editor.error = None;
+            editor.refused = None;
+        }
         if let Err(error) = &validation {
             ui_kit::text(ui, error, ui_kit::Text::Report("physical_validation", true));
         }
@@ -470,9 +542,10 @@ pub(crate) fn rows(app: &mut SolveApp, ui: &mut egui::Ui, index: &mut usize, edi
     if discard {
         editor.draft = None;
         editor.error = None;
+        editor.refused = None;
     }
     if save && let Err(error) = editor.save(app, index) {
-        editor.error = Some(error);
+        editor.refuse(error, app.session.revision, &app.session.doc);
     }
     if let Some(error) = &editor.error {
         ui_kit::text(ui, error, ui_kit::Text::Report("physical_save_error", true));
